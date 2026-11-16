@@ -33,32 +33,39 @@ def cd_drives(cfg: dict) -> list[str]:
 
 def disc_signature(drive: str) -> str | None:
     """None if the drive holds no audio CD; otherwise a string that identifies the disc."""
+    return drive_state(drive)[0]
+
+
+def drive_state(drive: str) -> tuple[str | None, str]:
+    """(signature or None, plain description of what the drive currently shows)."""
     if WINDOWS:
         # Windows presents audio tracks as tiny TrackNN.cda stubs holding the track
         # positions and a disc serial - hashing them fingerprints the disc.
         root = drive.rstrip("\\") + "\\"
         try:
-            names = sorted(n for n in os.listdir(root) if n.lower().endswith(".cda"))
+            entries = os.listdir(root)
+            names = sorted(n for n in entries if n.lower().endswith(".cda"))
             if not names:
-                return None
+                return None, f"disc with {len(entries)} entries but no audio tracks (data or mixed-mode disc?)"
             h = hashlib.sha1()
             for n in names:
                 with open(root + n, "rb") as f:
                     h.update(f.read())
-            return h.hexdigest()
-        except OSError:
-            return None
+            return h.hexdigest(), f"audio CD, {len(names)} tracks, fingerprint {h.hexdigest()[:8]}"
+        except OSError as e:
+            return None, f"no readable disc ({e.strerror or e})"
     try:
         import fcntl
         fd = os.open(drive, os.O_RDONLY | os.O_NONBLOCK)
         try:
             if fcntl.ioctl(fd, 0x5326, 0) != 4:                # CDROM_DRIVE_STATUS != CDS_DISC_OK
-                return None
-            return "audio" if fcntl.ioctl(fd, 0x5327, 0) in (100, 105) else None   # CDS_AUDIO / CDS_MIXED
+                return None, "no disc"
+            audio = fcntl.ioctl(fd, 0x5327, 0) in (100, 105)   # CDS_AUDIO / CDS_MIXED
+            return ("audio", "audio CD") if audio else (None, "disc without audio tracks")
         finally:
             os.close(fd)
-    except (OSError, ImportError):
-        return None
+    except (OSError, ImportError) as e:
+        return None, f"no readable disc ({e})"
 
 
 def eject(drive: str) -> None:
@@ -119,16 +126,27 @@ def watch(cfg: dict) -> None:
     log.info("watching for audio CDs on %s (Ctrl+C to stop)", cfg["rip"]["drive"] or "any optical drive")
     done: dict[str, str] = {}        # drive -> signature of the disc we already handled
     seen_empty: set[str] = set()
+    shown: dict[str, str] = {}       # drive -> last state we logged, so only changes are logged
     try:
         while True:
-            for drive in cd_drives(cfg):
-                sig = disc_signature(drive)
+            drives = cd_drives(cfg)
+            if shown.get("") != str(drives):
+                shown[""] = str(drives)
+                log.info("optical drives: %s", ", ".join(drives) or "none found")
+            for drive in drives:
+                sig, state = drive_state(drive)
+                # Windows: skip a disc we just did, even if the tray closed itself on it again.
+                # Elsewhere the signature is generic, so require the drive to have been empty.
+                same = sig is not None and done.get(drive) == sig and (WINDOWS or drive not in seen_empty)
+                if same:
+                    state += " - same disc as the one just ripped, waiting for a different one"
+                if shown.get(drive) != state:
+                    shown[drive] = state
+                    log.info("%s %s", drive, state)
                 if sig is None:
                     seen_empty.add(drive)
                     continue
-                # Windows: skip a disc we just did, even if the tray closed itself on it again.
-                # Elsewhere the signature is generic, so require the drive to have been empty.
-                if done.get(drive) == sig and (WINDOWS or drive not in seen_empty):
+                if same:
                     continue
                 time.sleep(3)        # let the drive settle
                 log.info("audio CD detected in %s", drive)
