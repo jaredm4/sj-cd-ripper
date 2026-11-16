@@ -117,19 +117,29 @@ def parse_accuraterip(data: bytes) -> list[list[tuple[int, int]]]:
     return pressings
 
 
-def verify_accuraterip(result: RipResult, ua: str, cddb: str | None = None) -> None:
-    """Re-check an UNVERIFIED rip against AccurateRip ourselves. Updates result in place."""
+def verify_accuraterip(result: RipResult, ua: str, cddb: str | None = None,
+                       disc_leadout: int | None = None) -> None:
+    """Re-check an UNVERIFIED rip against AccurateRip ourselves. Updates result in place.
+    disc_leadout: the disc's real lead-out sector. On an Enhanced CD that lies after the data
+    track, and AccurateRip's disc id is built from it rather than from the end of the audio."""
     ts = result.tracks
     if not ts or any(t.v1 is None or t.v2 is None or t.start is None or t.end is None for t in ts):
         return
-    url = accuraterip_url([t.start for t in ts], ts[-1].end + 1, cddb)
-    try:
-        pressings = parse_accuraterip(http_get(url, ua))
-    except NotFound:
-        result.message = (result.message + " " if result.message else "") + f"ripflow's own lookup: no entry at {url}"
-        return
-    except NetworkError as e:
-        result.message = (result.message + " " if result.message else "") + f"ripflow's own AccurateRip lookup failed: {e}"
+    note = lambda text: setattr(result, "message", (result.message + " " if result.message else "") + text)
+    starts, pressings, tried = [t.start for t in ts], None, []
+    for leadout in dict.fromkeys(x for x in (disc_leadout, ts[-1].end + 1) if x):
+        url = accuraterip_url(starts, leadout, cddb)
+        tried.append(url)
+        try:
+            pressings = parse_accuraterip(http_get(url, ua))
+            break
+        except NotFound:
+            continue
+        except NetworkError as e:
+            note(f"ripflow's own AccurateRip lookup failed: {e}")
+            return
+    if pressings is None:
+        note("ripflow's own lookup found no entry at: " + " or ".join(tried))
         return
     for i, t in enumerate(ts):
         conf = {v: sum(c for p in pressings if i < len(p) for c, crc in [p[i]] if crc == want)
@@ -142,6 +152,24 @@ def verify_accuraterip(result: RipResult, ua: str, cddb: str | None = None) -> N
     log.info("own AccurateRip lookup: %s (%s)", result.status, url)
 
 
+def _disc_leadout(log_text: str, drive: str) -> int | None:
+    """Real lead-out sector (LSN) of the disc: from the data-track entry in the cyanrip log if
+    it gives one, otherwise straight from the drive's table of contents (Windows)."""
+    m = re.search(r"(?ms)^Track \d+ is data.*?End LSN:\s+(\d+)", log_text)
+    if m:
+        return int(m.group(1)) + 1
+    try:
+        from .watch import WINDOWS, _windows_toc
+        toc = _windows_toc(drive) if WINDOWS else None
+        for pos in range(4, len(toc or b"") - 7, 8):
+            if toc[pos + 2] == 0xAA:                       # lead-out entry: 0, minutes, seconds, frames
+                _, mm, ss, ff = toc[pos + 4:pos + 8]
+                return (mm * 60 + ss) * 75 + ff - 150
+    except Exception as e:
+        log.debug("could not read the disc lead-out: %r", e)
+    return None
+
+
 def _run_with_progress(cmd: list[str], cwd: Path, console: Path, timeout: float, every: float) -> tuple[int, bool]:
     """Run cyanrip, save everything it prints to `console`, and relay progress to our log:
     a line whenever it moves to another track, plus its latest status line every `every` seconds."""
@@ -149,7 +177,7 @@ def _run_with_progress(cmd: list[str], cwd: Path, console: Path, timeout: float,
     timed_out = threading.Event()
     killer = threading.Timer(timeout, lambda: (timed_out.set(), proc.kill()))
     killer.start()
-    pending, track, last_said, last_time = b"", None, "", time.monotonic()
+    pending, track, last_time = b"", None, time.monotonic()
     try:
         with open(console, "wb") as out:
             while chunk := proc.stdout.read1(4096):
@@ -160,12 +188,15 @@ def _run_with_progress(cmd: list[str], cwd: Path, console: Path, timeout: float,
                     line = " ".join(raw.decode("utf-8", "replace").split())
                     if not line:
                         continue
-                    m = re.search(r"\btrack\s+(\d+)", line, re.I)
+                    m = re.search(r"track\s+(\d+),\s*progress\s*-\s*([\d.]+)%(?:,\s*ETA\s*-\s*(.+))?", line, re.I)
+                    if not m:
+                        continue
                     now = time.monotonic()
-                    if (m and m.group(1) != track) or (every and now - last_time >= every and line != last_said):
-                        track = m.group(1) if m else track
-                        last_said, last_time = line, now
-                        log.info("cyanrip: %s", line[:160])
+                    if m.group(1) != track or (every and now - last_time >= every):
+                        started = m.group(1) != track
+                        track, last_time = m.group(1), now
+                        eta = m.group(3) if m.group(3) and not started else ""    # the ETA is noise at a track start
+                        log.info("ripping track %s: %.0f%%%s", track, float(m.group(2)), f", about {eta} left" if eta else "")
         return proc.wait(), timed_out.is_set()
     finally:
         killer.cancel()
@@ -214,6 +245,6 @@ def rip_disc(cfg: dict, drive: str) -> RipResult:
             result.status = "UNKNOWN"
     if result.status == "UNVERIFIED":
         m = re.search(r"(?im)^\s*CDDB ID:\s*([0-9A-F]{8})\s*$", text)
-        verify_accuraterip(result, cfg["_user_agent"], m.group(1) if m else None)
+        verify_accuraterip(result, cfg["_user_agent"], m.group(1) if m else None, _disc_leadout(text, drive))
     log.info("rip finished: %s, %d files, disc id %s", result.status, len(result.files), result.discid)
     return result

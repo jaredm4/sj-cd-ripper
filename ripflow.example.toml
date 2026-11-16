@@ -24,7 +24,8 @@ library = 'D:\Music'             # finished albums land here: <library>/<artist>
 # timeout_minutes = 180            # give up on a badly scratched disc after this long
 # progress_seconds = 20            # how often cyanrip's progress line is repeated in the log (0 = track changes only)
 # Full cyanrip argument list, if you want to tune it ({drive}/{offset} are filled in):
-# args = ["-d", "{drive}", "-s", "{offset}", "-N", "-o", "flac", "-D", "rip"]
+# (-N: no metadata lookup, ripflow does it; -K: no ReplayGain scan, rsgain does it)
+# args = ["-d", "{drive}", "-s", "{offset}", "-N", "-K", "-o", "flac", "-D", "rip"]
 
 [musicbrainz]
 # contact = ""                     # your email or a URL - MusicBrainz asks API users to identify themselves

@@ -20,7 +20,8 @@ DEFAULTS: dict = {
         "drive": "",            # "" = any drive holding an audio CD
         "drive_offset": "",     # read offset in samples, e.g. 6 (same number EAC uses)
         # {drive} and {offset} are substituted; the "-s" pair is dropped if no offset is set.
-        "args": ["-d", "{drive}", "-s", "{offset}", "-N", "-o", "flac", "-D", "rip"],
+        # -N: no metadata lookup (ripflow does it); -K: no ReplayGain scan (rsgain does it)
+        "args": ["-d", "{drive}", "-s", "{offset}", "-N", "-K", "-o", "flac", "-D", "rip"],
         "timeout_minutes": 180,
         "progress_seconds": 20,  # how often to repeat cyanrip's progress line in the log (0 = track changes only)
         "poll_seconds": 5,
