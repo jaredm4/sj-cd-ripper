@@ -1,0 +1,60 @@
+# Copy to ripflow.toml (next to the ripflow folder) and edit.
+# Use forward slashes or single-quoted strings for Windows paths.
+
+[paths]
+library = 'D:\Music'             # finished albums land here: <library>/<artist>/<album>/
+# staging = 'D:\ripflow\work'    # rips land here first (default: work/ next to this file)
+# logs    = 'D:\ripflow\logs'    # ripflow.log, ATTENTION.log, reports/ (default: logs/ next to this file)
+
+[tools]
+cyanrip = 'C:\Tools\cyanrip-win64.exe'
+flac    = 'flac'                 # reference decoder for integrity checks; ffmpeg is used if missing
+ffmpeg  = 'ffmpeg'
+rsgain  = 'rsgain'
+
+[rip]
+drive = ""                       # "" = any drive with an audio CD, or e.g. "F:"
+drive_offset = ""                # your drive's read offset in samples - the same number EAC uses (e.g. 6, 667)
+eject = "always"                 # always | success (tray stays shut when something needs attention) | never
+beep = true                      # 1 beep = fine, 3 low beeps = check ATTENTION.log
+timeout_minutes = 180            # give up on a badly scratched disc after this long
+# Full cyanrip argument list, if you want to tune it ({drive}/{offset} are filled in):
+# args = ["-d", "{drive}", "-s", "{offset}", "-N", "-o", "flac", "-D", "rip"]
+
+[musicbrainz]
+contact = ""                     # your email or a URL - MusicBrainz asks API users to identify themselves
+prefer_countries = ["US", "XW", "XE"]   # most preferred first (XW = worldwide, XE = Europe); all others after
+avoid_countries = ["JP", "CN"]          # only chosen when nothing else matches
+max_track_diff_seconds = 7       # for non-disc-ID matches: reject releases whose track lengths differ more
+genres = 3                       # how many MusicBrainz genres to write (0 = none)
+
+[cover]
+enabled = true
+sources = ["local", "itunes", "coverartarchive", "deezer"]   # tried in this order
+min_size = 1000                  # smaller than this: keep looking, and flag it if nothing better turns up
+good_size = 1500                 # stop searching once we have at least this
+max_size = 3000                  # anything larger is scaled down to this
+reject_below = 600               # never save anything smaller
+jpeg_quality = 88                # only used when the image has to be re-encoded (PNG source or downscale)
+embed_size = 600
+embed_quality = 85
+
+[tags]
+# Existing tags that survive a retag; everything else is replaced with MusicBrainz data.
+# A trailing * matches a prefix (e.g. "REPLAYGAIN_*").
+keep = ["ALBUM DYNAMIC RANGE", "DYNAMIC RANGE", "ISRC", "MUSICBRAINZ_DISCID", "UPC"]
+
+[dr]
+enabled = true                   # measure dynamic range (needs numpy)
+write_tags = true                # DYNAMIC RANGE / ALBUM DYNAMIC RANGE
+write_log = true                 # dr.txt in the album folder
+
+[rsgain]
+enabled = true
+args = ["easy", "--output", "{album}"]   # {album} = the finished album folder
+
+[naming]
+album_dir = "{albumartist}/{album}"          # also available: {year}
+track = "{track:02d} - {title}"
+track_multidisc = "{disc}-{track:02d} - {title}"
+unknown_artist = "Unknown"

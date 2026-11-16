@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+# local config and working data
+ripflow.toml
+logs/
+work/
+flac_report.tsv
+.DS_Store
