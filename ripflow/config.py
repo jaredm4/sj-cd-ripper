@@ -22,6 +22,7 @@ DEFAULTS: dict = {
         # {drive} and {offset} are substituted; the "-s" pair is dropped if no offset is set.
         "args": ["-d", "{drive}", "-s", "{offset}", "-N", "-o", "flac", "-D", "rip"],
         "timeout_minutes": 180,
+        "progress_seconds": 20,  # how often to repeat cyanrip's progress line in the log (0 = track changes only)
         "poll_seconds": 5,
         "eject": "always",      # always | success | never
         "beep": True,           # Windows only: 1 beep = fine, 3 = needs attention

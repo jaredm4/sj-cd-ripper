@@ -73,6 +73,7 @@ Ranking, most important first:
 4. Not in `avoid_countries`
 5. Explicit edition over clean (reversed when the files are tagged `Rating=Clean`)
 6. Format: CD first for ripped discs; Digital Media, then CD, for existing FLAC files
+   (Enhanced CD, HDCD and similar count as CD)
 7. `prefer_countries` order, then any other or no country
 8. Has a barcode
 9. Has front cover art on MusicBrainz

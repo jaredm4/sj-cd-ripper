@@ -117,12 +117,11 @@ class MusicBrainz:
 # ---- choosing one release ----------------------------------------------------
 
 def _format_tier(fmt: str, source: str) -> int:
-    """Ripped discs want a CD release; existing FLAC files want Digital Media, then CD."""
+    """Ripped discs want a CD release; existing FLAC files want Digital Media, then CD.
+    Enhanced CD, HDCD, SHM-CD, CD-R and the like count as CD."""
     f = (fmt or "").lower()
-    kind = "cd" if f == "cd" else "cdlike" if "cd" in f else "digital" if f == "digital media" \
-        else "unknown" if not f else "other"       # cdlike: HDCD, Enhanced CD, SHM-CD, CD-R ...
-    order = ["cd", "cdlike", "unknown", "digital", "other"] if source == "rip" \
-        else ["digital", "cd", "cdlike", "unknown", "other"]
+    kind = "cd" if "cd" in f else "digital" if f == "digital media" else "unknown" if not f else "other"
+    order = ["cd", "unknown", "digital", "other"] if source == "rip" else ["digital", "cd", "unknown", "other"]
     return order.index(kind)
 
 

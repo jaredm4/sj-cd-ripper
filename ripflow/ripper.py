@@ -4,6 +4,8 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -57,6 +59,8 @@ def parse_log(text: str) -> tuple[str | None, list[TrackRip], str]:
     tracks = []
     for num, block in zip(parts[1::2], parts[2::2]):
         block = block or " "
+        if block.lstrip().lower().startswith("is data"):
+            continue                       # the data session of an Enhanced CD: nothing to rip
         results = _AR.findall(block)
         good = [r for r in results if r[2].lower().startswith("accurately ripped")]
         detail = "; ".join(f"v{v} {crc} {txt}".strip() for v, crc, txt in results)
@@ -84,16 +88,19 @@ def parse_log(text: str) -> tuple[str | None, list[TrackRip], str]:
 # cyanrip computes the checksums but its database lookup sometimes reports "not found"
 # for discs that are there. The checksums in its log are all we need to ask ourselves.
 
-def accuraterip_url(starts: list[int], leadout: int) -> str:
-    """Database URL for a disc, from track start sectors and the lead-out sector (LSN, 0-based)."""
+def accuraterip_url(starts: list[int], leadout: int, cddb: str | None = None) -> str:
+    """Database URL for a disc, from audio-track start sectors and the sector after the last
+    audio track (LSN, 0-based). `cddb` is the disc's CDDB/freedb id if known: on an Enhanced CD
+    it also covers the data track, so it cannot be derived from the audio tracks alone."""
     n = len(starts)
     id1 = (sum(starts) + leadout) & 0xFFFFFFFF
     id2 = (sum(max(s, 1) * i for i, s in enumerate(starts, 1)) + leadout * (n + 1)) & 0xFFFFFFFF
     digits = lambda secs: sum(int(c) for c in str(secs))
-    cddb = ((sum(digits((s + 150) // 75) for s in starts) % 255) << 24
-            | ((leadout + 150) // 75 - (starts[0] + 150) // 75) << 8 | n)
+    if not cddb:
+        cddb = "%08x" % ((sum(digits((s + 150) // 75) for s in starts) % 255) << 24
+                         | ((leadout + 150) // 75 - (starts[0] + 150) // 75) << 8 | n)
     return (f"http://www.accuraterip.com/accuraterip/{id1 & 0xF:x}/{id1 >> 4 & 0xF:x}/{id1 >> 8 & 0xF:x}/"
-            f"dBAR-{n:03d}-{id1:08x}-{id2:08x}-{cddb:08x}.bin")
+            f"dBAR-{n:03d}-{id1:08x}-{id2:08x}-{cddb.lower()}.bin")
 
 
 def parse_accuraterip(data: bytes) -> list[list[tuple[int, int]]]:
@@ -110,12 +117,12 @@ def parse_accuraterip(data: bytes) -> list[list[tuple[int, int]]]:
     return pressings
 
 
-def verify_accuraterip(result: RipResult, ua: str) -> None:
+def verify_accuraterip(result: RipResult, ua: str, cddb: str | None = None) -> None:
     """Re-check an UNVERIFIED rip against AccurateRip ourselves. Updates result in place."""
     ts = result.tracks
     if not ts or any(t.v1 is None or t.v2 is None or t.start is None or t.end is None for t in ts):
         return
-    url = accuraterip_url([t.start for t in ts], ts[-1].end + 1)
+    url = accuraterip_url([t.start for t in ts], ts[-1].end + 1, cddb)
     try:
         pressings = parse_accuraterip(http_get(url, ua))
     except NotFound:
@@ -133,6 +140,35 @@ def verify_accuraterip(result: RipResult, ua: str) -> None:
                     "(ripflow lookup, checksums from cyanrip)")
     result.status = _status(ts)
     log.info("own AccurateRip lookup: %s (%s)", result.status, url)
+
+
+def _run_with_progress(cmd: list[str], cwd: Path, console: Path, timeout: float, every: float) -> tuple[int, bool]:
+    """Run cyanrip, save everything it prints to `console`, and relay progress to our log:
+    a line whenever it moves to another track, plus its latest status line every `every` seconds."""
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    timed_out = threading.Event()
+    killer = threading.Timer(timeout, lambda: (timed_out.set(), proc.kill()))
+    killer.start()
+    pending, track, last_said, last_time = b"", None, "", time.monotonic()
+    try:
+        with open(console, "wb") as out:
+            while chunk := proc.stdout.read1(4096):
+                out.write(chunk)
+                pending += chunk
+                *lines, pending = re.split(rb"[\r\n]+", pending)     # progress lines end in \r
+                for raw in lines:
+                    line = " ".join(raw.decode("utf-8", "replace").split())
+                    if not line:
+                        continue
+                    m = re.search(r"\btrack\s+(\d+)", line, re.I)
+                    now = time.monotonic()
+                    if (m and m.group(1) != track) or (every and now - last_time >= every and line != last_said):
+                        track = m.group(1) if m else track
+                        last_said, last_time = line, now
+                        log.info("cyanrip: %s", line[:160])
+        return proc.wait(), timed_out.is_set()
+    finally:
+        killer.cancel()
 
 
 def rip_disc(cfg: dict, drive: str) -> RipResult:
@@ -157,11 +193,8 @@ def rip_disc(cfg: dict, drive: str) -> RipResult:
     cmd = [exe, *args]
     log.info("ripping %s: %s", drive, " ".join(cmd))
     console = folder / "cyanrip-console.txt"
-    try:
-        with open(console, "wb") as out:
-            code = subprocess.run(cmd, cwd=folder, stdout=out, stderr=subprocess.STDOUT,
-                                  stdin=subprocess.DEVNULL, timeout=r["timeout_minutes"] * 60).returncode
-    except subprocess.TimeoutExpired:
+    code, timed_out = _run_with_progress(cmd, folder, console, r["timeout_minutes"] * 60, r["progress_seconds"])
+    if timed_out:
         code, result.message = -1, f"cyanrip timed out after {r['timeout_minutes']} minutes"
     result.files = sorted((p for p in folder.rglob("*") if p.suffix.lower() == ".flac"),
                           key=lambda p: natural_key(p.name))
@@ -180,6 +213,7 @@ def rip_disc(cfg: dict, drive: str) -> RipResult:
         if result.status == "VERIFIED":
             result.status = "UNKNOWN"
     if result.status == "UNVERIFIED":
-        verify_accuraterip(result, cfg["_user_agent"])
+        m = re.search(r"(?im)^\s*CDDB ID:\s*([0-9A-F]{8})\s*$", text)
+        verify_accuraterip(result, cfg["_user_agent"], m.group(1) if m else None)
     log.info("rip finished: %s, %d files, disc id %s", result.status, len(result.files), result.discid)
     return result
