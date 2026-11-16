@@ -30,11 +30,9 @@ genres = 3                       # how many MusicBrainz genres to write (0 = non
 
 [cover]
 enabled = true
-sources = ["local", "itunes", "coverartarchive", "deezer"]   # tried in this order
-min_size = 1000                  # smaller than this: keep looking, and flag it if nothing better turns up
-good_size = 1500                 # stop searching once we have at least this
+sources = ["local", "itunes", "coverartarchive", "deezer"]   # all are tried; on equal size the earlier one wins
+min_size = 600                   # the largest image found wins, but it must be at least this
 max_size = 3000                  # anything larger is scaled down to this
-reject_below = 600               # never save anything smaller
 jpeg_quality = 88                # only used when the image has to be re-encoded (PNG source or downscale)
 embed_size = 600
 embed_quality = 85
@@ -55,6 +53,7 @@ args = ["easy", "--output", "{album}"]   # {album} = the finished album folder
 
 [naming]
 album_dir = "{albumartist}/{album}"          # also available: {year}
-track = "{track:02d} - {title}"
-track_multidisc = "{disc}-{track:02d} - {title}"
+# Defaults mirror the Picard preset: Artist/Album/Artist - Album - [disc-]NN Title
+track = "{albumartist} - {album} - {track:02d} {title}"
+track_multidisc = "{albumartist} - {album} - {disc}-{track:02d} {title}"   # also available: {artist}, {year}
 unknown_artist = "Unknown"

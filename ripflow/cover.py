@@ -59,7 +59,8 @@ def _deezer(cfg, ua, artist, album, various, ntracks):
 
 def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntracks: int = 0,
                mbid: str = "", group_id: str = "", local_dirs: list[Path] = ()) -> tuple[Cover | None, list[str]]:
-    """Walk the configured sources until one yields an image >= good_size. Never raises."""
+    """Try every configured source and keep the largest square image (ties: earlier source).
+    Stops early only when an image already reaches max_size. Never raises."""
     c, ua, notes = cfg["cover"], cfg["_user_agent"], []
     try:
         from PIL import Image
@@ -82,7 +83,7 @@ def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntr
         notes.append(f"{label}: {w}x{h}")
         if best is None or min(w, h) > best[0]:
             best = (min(w, h), data, label)
-        return min(w, h) >= c["good_size"]
+        return min(w, h) >= c["max_size"]
 
     def sources():
         for name in c["sources"]:
@@ -113,7 +114,7 @@ def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntr
     for label, data in sources():
         if consider(data, label):
             break
-    if best is None or best[0] < c["reject_below"]:
+    if best is None or best[0] < c["min_size"]:
         return None, notes
 
     _, data, label = best
@@ -122,7 +123,7 @@ def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntr
         original_jpeg = im.format == "JPEG" and im.mode == "RGB"
         rgb = im.convert("RGB")
     if max(rgb.size) > c["max_size"]:
-        rgb.thumbnail((c["max_size"], c["max_size"]), Image.LANCZOS)
+        rgb.thumbnail((c["max_size"], c["max_size"]), Image.Resampling.LANCZOS)
         original_jpeg = False
     if original_jpeg:
         jpeg = data                    # already a JPEG within limits: keep it, no generation loss
@@ -131,7 +132,7 @@ def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntr
         rgb.save(buf, "JPEG", quality=c["jpeg_quality"], optimize=True)
         jpeg = buf.getvalue()
     small = rgb.copy()
-    small.thumbnail((c["embed_size"], c["embed_size"]), Image.LANCZOS)
+    small.thumbnail((c["embed_size"], c["embed_size"]), Image.Resampling.LANCZOS)
     buf = io.BytesIO()
     small.save(buf, "JPEG", quality=c["embed_quality"], optimize=True)
     cover = Cover(jpeg, rgb.width, rgb.height, label, (buf.getvalue(), small.width, small.height), notes)

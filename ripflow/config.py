@@ -38,10 +38,8 @@ DEFAULTS: dict = {
         "enabled": True,
         "sources": ["local", "itunes", "coverartarchive", "deezer"],
         "itunes_country": "US",
-        "min_size": 1000,       # below this we keep looking (and warn if nothing better)
-        "good_size": 1500,      # stop searching once we have at least this
+        "min_size": 600,        # the largest image found wins, but it must be at least this
         "max_size": 3000,       # larger images are scaled down to this
-        "reject_below": 600,    # never save anything smaller than this
         "jpeg_quality": 88,
         "embed_size": 600,
         "embed_quality": 85,
@@ -55,8 +53,8 @@ DEFAULTS: dict = {
     "rsgain": {"enabled": True, "args": ["easy", "--output", "{album}"]},
     "naming": {
         "album_dir": "{albumartist}/{album}",
-        "track": "{track:02d} - {title}",
-        "track_multidisc": "{disc}-{track:02d} - {title}",
+        "track": "{albumartist} - {album} - {track:02d} {title}",
+        "track_multidisc": "{albumartist} - {album} - {disc}-{track:02d} {title}",
         "unknown_artist": "Unknown",
     },
 }

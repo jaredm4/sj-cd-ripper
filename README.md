@@ -14,7 +14,7 @@ watch (daemon)        process <folder>
 
 ## Setup (Windows)
 
-1. **Python 3.11+**, then `pip install pillow numpy` (cover art, dynamic range).
+1. **Python 3.11+**, then `pip install -r requirements.txt` (Pillow for cover art, numpy for dynamic range).
 2. **cyanrip**: download `cyanrip-win64.exe` from https://github.com/cyanreg/cyanrip/releases
 3. **flac**: https://xiph.org/flac/download.html (put `flac.exe` on PATH or set its path in the config).
    If flac is missing, ffmpeg is used for the integrity check instead.
@@ -80,6 +80,14 @@ No match: files go to `<library>/Unknown/<date time>/` as `Track 01...`, with a 
 containing the disc ID and a link that adds the disc to MusicBrainz. Once it exists there:
 `python -m ripflow process "<that folder>" --move`.
 
+## File names
+
+Defaults mirror the Picard naming preset:
+`Artist/Album/Artist - Album - 01 Title.flac`, or `... - 1-01 Title.flac` when the release
+has more than one disc. As in Picard, each of `* : < > ? | "` becomes `_`, and a leading
+period becomes `_` (`_..And Justice for All`). Trailing periods stay on file names; on a
+folder name a trailing period also becomes `_` (`P.O.D_`), because Windows cannot store it.
+
 ## Tags
 
 On a MusicBrainz match all existing tags are dropped except the `[tags] keep` list
@@ -94,9 +102,11 @@ On a MusicBrainz match all existing tags are dropped except the `[tags] keep` li
 
 ## Cover art
 
-Sources in order: an existing `cover/folder/front.jpg|png`, Apple (iTunes search API, up to
-3000 px), Cover Art Archive (original-size front image), Deezer (1000 px). A result is only used when artist and album
-names match closely. Output: `cover.jpg` (original bytes kept when it is already a JPEG no
+Every source is tried and the largest square image wins: an existing
+`cover/folder/front.jpg|png`, Apple (iTunes search API), Cover Art Archive (original-size
+front image), Deezer (1000 px). On equal size the earlier source wins. The image must be at
+least `min_size` (600) and is scaled down to `max_size` (3000). Apple and Deezer results are
+only considered when artist and album names match closely. Output: `cover.jpg` (original bytes kept when it is already a JPEG no
 larger than 3000 px, otherwise re-encoded) plus a 600 px copy embedded in each track.
 
 ## Not tested yet

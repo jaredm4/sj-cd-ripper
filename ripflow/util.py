@@ -58,16 +58,28 @@ def similar(a: str, b: str) -> float:
     return 1.0 if a == b else SequenceMatcher(None, a, b).ratio()
 
 
-_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_UNSAFE = re.compile(r'[*:<>?|"/\\\x00-\x1f]')
 _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
 
 
-def safe_name(text: str, limit: int = 120) -> str:
-    """Make one path component safe on Windows (and therefore everywhere)."""
-    text = _ILLEGAL.sub("_", str(text)).strip()
-    text = text[:limit].rstrip(". ")
+def safe_field(text: str) -> str:
+    """A tag value on its way into a file name, the way MusicBrainz Picard does it:
+    each of * : < > ? | " (and path separators) becomes an underscore."""
+    return _UNSAFE.sub("_", str(text)).strip()
+
+
+def safe_component(text: str, is_dir: bool = False, limit: int = 180) -> str:
+    """One finished folder or file name (without extension). As in Picard, a leading
+    period becomes an underscore ("...And Justice for All" -> "_..And Justice for All").
+    Trailing periods are kept on file names; on folder names a trailing period also
+    becomes an underscore ("P.O.D." -> "P.O.D_"), since Windows cannot store it."""
+    text = safe_field(text)[:limit].strip()
+    if is_dir and text.endswith("."):
+        text = text[:-1] + "_"
+    if text.startswith("."):
+        text = "_" + text[1:]
     if not text or text.upper().split(".")[0] in _RESERVED:
-        text = (text + "_") if text else "_"
+        text += "_"
     return text
 
 

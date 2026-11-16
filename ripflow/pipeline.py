@@ -18,7 +18,7 @@ from .discid import Toc, toc_from_param, toc_from_samples
 from .flacfile import FlacError, FlacInfo, read_info, write_tags
 from .musicbrainz import Album, MusicBrainz, identify
 from .ripper import RipResult
-from .util import lead_int, natural_key, safe_name
+from .util import lead_int, natural_key, safe_component, safe_field
 from .verify import check_many, pick_decoder
 
 
@@ -216,12 +216,15 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
                                if ident.offline else " (add the disc on MusicBrainz, then re-run "
                                                      "`ripflow process` on the folder)"))
 
-    fields = {"albumartist": safe_name(artist), "album": safe_name(title), "year": year or "0000"}
+    fields = {"albumartist": safe_field(artist), "album": safe_field(title), "year": year or "0000",
+              "disc": disc}
     dest_dir = Path(cfg["paths"]["library"]).joinpath(
-        *[safe_name(part.format(**fields)) for part in naming["album_dir"].split("/")])
+        *[safe_component(part.format(**fields), is_dir=True) for part in naming["album_dir"].split("/")])
     pattern = naming["track_multidisc"] if disc_total > 1 else naming["track"]
-    targets = [dest_dir / (safe_name(pattern.format(track=it.track, disc=disc, title=it.title,
-                                                    artist=artist, album=title)) + ".flac") for it in items]
+    targets = [dest_dir / (safe_component(pattern.format(
+                   track=it.track, title=safe_field(it.title),
+                   artist=safe_field(it.info.tag("ARTIST") if it.tags is None else it.tags.get("ARTIST", [artist])[0]),
+                   **fields)) + ".flac") for it in items]
     out.dest = dest_dir
     say(f"\n== Destination ==\n  {dest_dir}")
     for it, tgt in zip(items, targets):
@@ -249,11 +252,9 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
         for n in notes:
             say("  " + n)
         if cover is None:
-            out.problems.append("no usable cover art found")
+            out.problems.append(f"no cover art of at least {cfg['cover']['min_size']}px found")
         else:
             say(f"  chosen: {cover.source} {cover.width}x{cover.height}")
-            if cover.size < cfg["cover"]["min_size"]:
-                out.problems.append(f"cover art is only {cover.width}x{cover.height} ({cover.source})")
 
     # 5. dynamic range (measured now, written with the other tags) --------------
     dr_rows = None
@@ -333,7 +334,7 @@ def _finish(cfg: dict, out: Outcome, dry_run: bool) -> Outcome:
         return out
     reports = Path(cfg["paths"]["logs"]) / "reports"
     reports.mkdir(parents=True, exist_ok=True)
-    name = safe_name(f"{datetime.now():%Y-%m-%d %H.%M.%S} {out.label or out.source.name}", 150) + ".txt"
+    name = safe_component(f"{datetime.now():%Y-%m-%d %H.%M.%S} {out.label or out.source.name}", limit=150) + ".txt"
     (reports / name).write_text(text, encoding="utf-8")
     where = out.dest or out.source
     log.info("%s -> %s (%s)", out.label or out.source.name, where,
