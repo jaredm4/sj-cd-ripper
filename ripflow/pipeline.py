@@ -56,14 +56,14 @@ def _album_tags(cfg: dict, album: Album, n: int, info: FlacInfo, discid: str | N
     t = album.tracks[n - 1]
     one = lambda v: [str(v)] if v not in ("", None) else []
     tags = {
-        "TITLE": one(t.title), "ARTIST": one(t.artist),
-        "ARTISTS": t.artists if len(t.artists) > 1 else [],
+        "TITLE": one(t.title), "ARTIST": one(t.artist), "ARTISTS": t.artists, "ARTISTSORT": one(t.artist_sort),
         "ALBUM": one(album.title), "ALBUMARTIST": one(album.artist), "ALBUMARTISTSORT": one(album.artist_sort),
         "TRACKNUMBER": one(n), "TRACKTOTAL": one(len(album.tracks)), "TOTALTRACKS": one(len(album.tracks)),
         "DISCNUMBER": one(album.disc), "DISCTOTAL": one(album.disc_total), "TOTALDISCS": one(album.disc_total),
         "DATE": one(album.date), "ORIGINALDATE": one(album.original_date),
         "ORIGINALYEAR": one(album.original_date[:4]), "GENRE": album.genres,
-        "LABEL": one(album.label), "CATALOGNUMBER": one(album.catalog), "BARCODE": one(album.barcode),
+        "LABEL": album.labels, "CATALOGNUMBER": album.catalogs, "BARCODE": one(album.barcode),
+        "ASIN": one(album.asin), "SCRIPT": one(album.script),
         "MEDIA": one(album.media), "RELEASECOUNTRY": one(album.country),
         "RELEASESTATUS": one(album.status), "RELEASETYPE": one(album.release_type),
         "COMPILATION": one(1) if album.various else [],
@@ -71,7 +71,11 @@ def _album_tags(cfg: dict, album: Album, n: int, info: FlacInfo, discid: str | N
         "MUSICBRAINZ_ALBUMARTISTID": album.artist_ids, "MUSICBRAINZ_ARTISTID": t.artist_ids,
         "MUSICBRAINZ_TRACKID": one(t.recording_id), "MUSICBRAINZ_RELEASETRACKID": one(t.track_id),
     }
-    tags.update(_kept(cfg, info))
+    kept = _kept(cfg, info)
+    # ISRCs: what the file/disc carried first, then any further ones MusicBrainz knows
+    isrcs = list(dict.fromkeys([v.upper().replace("-", "") for v in kept.pop("ISRC", [])] + t.isrcs))
+    tags.update(kept)
+    tags["ISRC"] = isrcs
     if discid:
         tags["MUSICBRAINZ_DISCID"] = [discid]
     return {k: v for k, v in tags.items() if v}

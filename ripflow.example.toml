@@ -35,7 +35,9 @@ library = 'D:\Music'             # finished albums land here: <library>/<artist>
 
 [cover]
 # enabled = true
-# sources = ["local", "itunes", "coverartarchive", "deezer"]   # all are tried; on equal size the earlier one wins
+# sources = ["local", "itunes"]                      # the largest image from these wins
+# fallback_sources = ["coverartarchive", "deezer"]   # used only when none of the above has a usable image
+# max_aspect = 1.15                # up to this far from square is centre-cropped to a square; beyond it, skipped
 # min_size = 600                   # the largest image found wins, but it must be at least this
 # max_size = 3000                  # anything larger is scaled down to this
 # jpeg_quality = 88                # only used when the image has to be re-encoded (PNG source or downscale)

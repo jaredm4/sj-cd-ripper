@@ -48,8 +48,9 @@ Run from the folder that contains `ripflow.toml`:
 
 ## What gets checked
 
-1. **Rip**: cyanrip reads with full cd-paranoia checking and verifies each track against
-   AccurateRip v1 and v2. Results are read from its log:
+1. **Rip**: cyanrip reads with full cd-paranoia checking and computes AccurateRip v1/v2
+   checksums. If cyanrip itself reports the disc as not found, ripflow looks the disc up in the
+   AccurateRip database directly and compares cyanrip's checksums.
    VERIFIED (all tracks match), UNVERIFIED (disc not in the database), SUSPECT (a track mismatched).
 2. **Files** (fresh rips and existing FLACs): every FLAC is fully decoded; decoded sample count is
    compared with the header (catches truncation), decoder errors are captured, and the MD5 of
@@ -110,12 +111,16 @@ On a MusicBrainz match all existing tags are dropped except the `[tags] keep` li
 
 ## Cover art
 
-Every source is tried and the largest square image wins: an existing
-`cover/folder/front.jpg|png` or the art embedded in the first track, Apple (iTunes search API), Cover Art Archive (original-size
-front image), Deezer (1000 px). On equal size the earlier source wins. The image must be at
-least `min_size` (600) and is scaled down to `max_size` (3000). Apple and Deezer results are
-only considered when artist and album names match closely. Output: `cover.jpg` (original bytes kept when it is already a JPEG no
-larger than 3000 px, otherwise re-encoded) plus a 600 px copy embedded in each track.
+Primary sources (`sources`): an existing `cover/folder/front.jpg|png`, the art embedded in the
+first track, and Apple (iTunes search API, the Apple Music catalogue). The largest image among
+them wins. Only when none of them has a usable image are the `fallback_sources` tried: Cover
+Art Archive (original-size front image, often a scan) and Deezer (1000 px).
+
+An image must be at least `min_size` (600) and is scaled down to `max_size` (3000). Images
+that are slightly off square are centre-cropped, never stretched; anything beyond
+`max_aspect` is skipped. Apple and Deezer results are only considered when artist and album
+names match closely. Output: `cover.jpg` plus a 600 px copy embedded in each track, which
+replaces any art that was embedded before.
 
 ## Not tested yet
 

@@ -37,7 +37,9 @@ DEFAULTS: dict = {
     },
     "cover": {
         "enabled": True,
-        "sources": ["local", "itunes", "coverartarchive", "deezer"],
+        "sources": ["local", "itunes"],                      # largest image from these wins
+        "fallback_sources": ["coverartarchive", "deezer"],   # only if none of the above has one
+        "max_aspect": 1.15,     # up to this far from square is centre-cropped; beyond it, skipped
         "itunes_country": "US",
         "min_size": 600,        # the largest image found wins, but it must be at least this
         "max_size": 3000,       # larger images are scaled down to this

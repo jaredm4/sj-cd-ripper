@@ -10,7 +10,7 @@ from urllib.parse import quote
 
 from .config import log
 from .flacfile import FlacError, read_picture
-from .util import NetworkError, NotFound, http_get, similar
+from .util import NetworkError, NotFound, http_get, similar, strip_edition
 
 
 @dataclass
@@ -33,36 +33,44 @@ def _matches(artist: str, album: str, got_artist: str, got_album: str, various: 
     return (a + b) / 2 if a >= 0.8 and b >= 0.85 else 0.0
 
 
-def _itunes(cfg, ua, artist, album, various, ntracks):
-    term = quote(album if various else f"{artist} {album}", safe="")
-    url = (f"https://itunes.apple.com/search?term={term}&media=music&entity=album&limit=25"
-           f"&country={cfg['itunes_country']}")
-    hits = []
-    for r in json.loads(http_get(url, ua)).get("results", []):
-        score = _matches(artist, album, r.get("artistName", ""), r.get("collectionName", ""), various)
-        art = r.get("artworkUrl100")
-        if score and art:
-            score += 0.1 if r.get("trackCount") == ntracks else 0
-            big = re.sub(r"/\d+x\d+[a-z]*(-\d+)?\.(jpg|png)$", f"/{cfg['max_size']}x{cfg['max_size']}bb.jpg", art)
-            hits.append((score, big))
-    return [u for _, u in sorted(hits, reverse=True)[:3]]
+def _itunes(cfg, ua, artist, album, various, ntracks, notes):
+    """Apple's public catalogue search (the same artwork Apple Music shows)."""
+    hits, seen = [], 0
+    for term in dict.fromkeys([album if various else f"{artist} {album}", strip_edition(album, True)]):
+        url = (f"https://itunes.apple.com/search?term={quote(term, safe='')}&media=music&entity=album"
+               f"&limit=50&country={cfg['itunes_country']}")
+        results = json.loads(http_get(url, ua)).get("results", [])
+        seen += len(results)
+        for r in results:
+            score = _matches(artist, album, r.get("artistName", ""), r.get("collectionName", ""), various)
+            art = r.get("artworkUrl100")
+            if score and art:
+                score += 0.1 if r.get("trackCount") == ntracks else 0
+                big = re.sub(r"/\d+x\d+[a-z]*(-\d+)?\.(jpg|png)$", f"/{cfg['max_size']}x{cfg['max_size']}bb.jpg", art)
+                hits.append((score, big))
+        if hits:
+            break
+    notes.append(f"iTunes/Apple Music search: {seen} result(s), {len(hits)} matching artist + album")
+    return list(dict.fromkeys(u for _, u in sorted(hits, reverse=True)))[:3]
 
 
-def _deezer(cfg, ua, artist, album, various, ntracks):
+def _deezer(cfg, ua, artist, album, various, ntracks, notes):
     q = quote(f'album:"{album}"' if various else f'artist:"{artist}" album:"{album}"')
     hits = []
-    for r in json.loads(http_get(f"https://api.deezer.com/search/album?q={q}&limit=25", ua)).get("data", []):
+    data = json.loads(http_get(f"https://api.deezer.com/search/album?q={q}&limit=25", ua)).get("data", [])
+    for r in data:
         score = _matches(artist, album, (r.get("artist") or {}).get("name", ""), r.get("title", ""), various)
         if score and r.get("cover_xl"):
             hits.append((score + (0.1 if r.get("nb_tracks") == ntracks else 0), r["cover_xl"]))
+    notes.append(f"Deezer search: {len(data)} result(s), {len(hits)} matching artist + album")
     return [u for _, u in sorted(hits, reverse=True)[:2]]
 
 
 def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntracks: int = 0,
                mbid: str = "", group_id: str = "", local_dirs: list[Path] = (),
                embedded_from: Path | None = None) -> tuple[Cover | None, list[str]]:
-    """Try every configured source and keep the largest square image (ties: earlier source).
-    Stops early only when an image already reaches max_size. Never raises."""
+    """Largest usable image from `sources`; only if those yield nothing, the largest from
+    `fallback_sources`. Slightly non-square images are centre-cropped to a square. Never raises."""
     c, ua, notes = cfg["cover"], cfg["_user_agent"], []
     try:
         from PIL import Image
@@ -79,16 +87,16 @@ def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntr
         except Exception as e:
             notes.append(f"{label}: unreadable image ({e})")
             return False
-        if max(w, h) > 1.1 * min(w, h):
-            notes.append(f"{label}: {w}x{h} is not square, skipped")
+        if max(w, h) > c["max_aspect"] * min(w, h):
+            notes.append(f"{label}: {w}x{h} is too far from square (probably not a plain front cover), skipped")
             return False
-        notes.append(f"{label}: {w}x{h}")
-        if best is None or min(w, h) > best[0]:
+        notes.append(f"{label}: {w}x{h}" + ("" if w == h else f" (will be cropped to {min(w, h)}x{min(w, h)})"))
+        if min(w, h) >= c["min_size"] and (best is None or min(w, h) > best[0]):
             best = (min(w, h), data, label)
         return min(w, h) >= c["max_size"]
 
-    def sources():
-        for name in c["sources"]:
+    def sources(names):
+        for name in names:
             try:
                 if name == "local":
                     for d in local_dirs:
@@ -100,10 +108,10 @@ def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntr
                     if art:
                         yield f"embedded in {Path(embedded_from).name}", art
                 elif name == "itunes" and album:
-                    for u in _itunes(c, ua, artist, album, various, ntracks):
+                    for u in _itunes(c, ua, artist, album, various, ntracks, notes):
                         yield "iTunes/Apple Music", http_get(u, ua)
                 elif name == "deezer" and album:
-                    for u in _deezer(c, ua, artist, album, various, ntracks):
+                    for u in _deezer(c, ua, artist, album, various, ntracks, notes):
                         yield "Deezer", http_get(u, ua)
                 elif name == "coverartarchive":
                     for kind, ident in (("release", mbid), ("release-group", group_id)):
@@ -112,21 +120,28 @@ def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntr
                                 yield (f"Cover Art Archive ({kind})",
                                        http_get(f"https://coverartarchive.org/{kind}/{ident}/front", ua, timeout=60))
                             except NotFound:
-                                pass
+                                notes.append(f"Cover Art Archive ({kind}): no front image")
             except (NetworkError, NotFound, FlacError, OSError, ValueError) as e:
                 notes.append(f"{name}: {e}")
 
-    for label, data in sources():
-        if consider(data, label):
+    for group in (c["sources"], c["fallback_sources"]):
+        for label, data in sources(group):
+            if consider(data, label):
+                break
+        if best is not None:
             break
-    if best is None or best[0] < c["min_size"]:
+    if best is None:
         return None, notes
 
     _, data, label = best
     with Image.open(io.BytesIO(data)) as im:
         im.load()
-        original_jpeg = im.format == "JPEG" and im.mode == "RGB"
+        original_jpeg = im.format == "JPEG" and im.mode == "RGB" and im.width == im.height
         rgb = im.convert("RGB")
+    if rgb.width != rgb.height:             # centre-crop (never stretch) to a square
+        side = min(rgb.size)
+        left, top = (rgb.width - side) // 2, (rgb.height - side) // 2
+        rgb = rgb.crop((left, top, left + side, top + side))
     if max(rgb.size) > c["max_size"]:
         rgb.thumbnail((c["max_size"], c["max_size"]), Image.Resampling.LANCZOS)
         original_jpeg = False

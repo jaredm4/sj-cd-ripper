@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import log
-from .util import natural_key
+from .util import NetworkError, NotFound, http_get, natural_key
 
 
 @dataclass
@@ -18,6 +18,10 @@ class TrackRip:
     state: str            # accurate | mismatch | unverified | failed
     confidence: int = 0
     detail: str = ""
+    v1: int | None = None        # AccurateRip checksums cyanrip computed for this track
+    v2: int | None = None
+    start: int | None = None     # first / last sector (LSN) of the track on the disc
+    end: int | None = None
 
 
 @dataclass
@@ -31,7 +35,18 @@ class RipResult:
     message: str = ""
 
 
-_AR = re.compile(r"Accurip v([12]):\s+([0-9A-Fa-f]{8})\s+\(([^)]*)\)")
+_AR = re.compile(r"Accurip v([12]):\s+([0-9A-Fa-f]{8})(?:[ \t]+\(([^)]*)\))?")
+
+
+def _status(tracks: list[TrackRip]) -> str:
+    states = {t.state for t in tracks}
+    if not tracks:
+        return "UNKNOWN"
+    if "failed" in states:
+        return "FAILED"
+    if "mismatch" in states:
+        return "SUSPECT"
+    return "VERIFIED" if states == {"accurate"} else "UNVERIFIED"
 
 
 def parse_log(text: str) -> tuple[str | None, list[TrackRip], str]:
@@ -44,30 +59,80 @@ def parse_log(text: str) -> tuple[str | None, list[TrackRip], str]:
         block = block or " "
         results = _AR.findall(block)
         good = [r for r in results if r[2].lower().startswith("accurately ripped")]
-        detail = "; ".join(f"v{v} {crc} {txt}" for v, crc, txt in results)
+        detail = "; ".join(f"v{v} {crc} {txt}".strip() for v, crc, txt in results)
         if "successfully" not in block.splitlines()[0]:
-            tracks.append(TrackRip(int(num), "failed", detail=block.splitlines()[0].strip()))
+            t = TrackRip(int(num), "failed", detail=block.splitlines()[0].strip())
         elif good:
             conf = max(int(c) for r in good for c in re.findall(r"confidence (\d+)", r[2]) or ["0"])
-            tracks.append(TrackRip(int(num), "accurate", conf, detail))
+            t = TrackRip(int(num), "accurate", conf, detail)
         elif re.search(r"Accurip:\s+disc found", block):
             if "partially accurately ripped" in block:
                 detail += "; partial (450-frame) match only"
-            tracks.append(TrackRip(int(num), "mismatch", detail=detail))
+            t = TrackRip(int(num), "mismatch", detail=detail)
         else:
-            tracks.append(TrackRip(int(num), "unverified", detail=detail or "disc not in AccurateRip"))
-    states = {t.state for t in tracks}
-    if not tracks:
-        status = "UNKNOWN"
-    elif "failed" in states:
-        status = "FAILED"
-    elif "mismatch" in states:
-        status = "SUSPECT"
-    elif states == {"accurate"}:
-        status = "VERIFIED"
-    else:
-        status = "UNVERIFIED"
-    return discid, tracks, status
+            t = TrackRip(int(num), "unverified", detail="cyanrip did not find the disc in AccurateRip")
+        crcs = {v: int(crc, 16) for v, crc, _ in results}
+        t.v1, t.v2 = crcs.get("1"), crcs.get("2")
+        for name, attr in (("Start", "start"), ("End", "end")):
+            m = re.search(rf"{name} LSN:\s+(\d+)", block)
+            setattr(t, attr, int(m.group(1)) if m else None)
+        tracks.append(t)
+    return discid, tracks, _status(tracks)
+
+
+# ---- our own AccurateRip lookup ------------------------------------------------
+# cyanrip computes the checksums but its database lookup sometimes reports "not found"
+# for discs that are there. The checksums in its log are all we need to ask ourselves.
+
+def accuraterip_url(starts: list[int], leadout: int) -> str:
+    """Database URL for a disc, from track start sectors and the lead-out sector (LSN, 0-based)."""
+    n = len(starts)
+    id1 = (sum(starts) + leadout) & 0xFFFFFFFF
+    id2 = (sum(max(s, 1) * i for i, s in enumerate(starts, 1)) + leadout * (n + 1)) & 0xFFFFFFFF
+    digits = lambda secs: sum(int(c) for c in str(secs))
+    cddb = ((sum(digits((s + 150) // 75) for s in starts) % 255) << 24
+            | ((leadout + 150) // 75 - (starts[0] + 150) // 75) << 8 | n)
+    return (f"http://www.accuraterip.com/accuraterip/{id1 & 0xF:x}/{id1 >> 4 & 0xF:x}/{id1 >> 8 & 0xF:x}/"
+            f"dBAR-{n:03d}-{id1:08x}-{id2:08x}-{cddb:08x}.bin")
+
+
+def parse_accuraterip(data: bytes) -> list[list[tuple[int, int]]]:
+    """A dBAR file is a series of pressings: each a list of (confidence, checksum) per track."""
+    pressings, pos = [], 0
+    while pos + 13 <= len(data):
+        n = data[pos]
+        pos += 13
+        if pos + 9 * n > len(data):
+            break
+        pressings.append([(data[pos + 9 * i], int.from_bytes(data[pos + 9 * i + 1:pos + 9 * i + 5], "little"))
+                          for i in range(n)])
+        pos += 9 * n
+    return pressings
+
+
+def verify_accuraterip(result: RipResult, ua: str) -> None:
+    """Re-check an UNVERIFIED rip against AccurateRip ourselves. Updates result in place."""
+    ts = result.tracks
+    if not ts or any(t.v1 is None or t.v2 is None or t.start is None or t.end is None for t in ts):
+        return
+    url = accuraterip_url([t.start for t in ts], ts[-1].end + 1)
+    try:
+        pressings = parse_accuraterip(http_get(url, ua))
+    except NotFound:
+        result.message = (result.message + " " if result.message else "") + f"ripflow's own lookup: no entry at {url}"
+        return
+    except NetworkError as e:
+        result.message = (result.message + " " if result.message else "") + f"ripflow's own AccurateRip lookup failed: {e}"
+        return
+    for i, t in enumerate(ts):
+        conf = {v: sum(c for p in pressings if i < len(p) for c, crc in [p[i]] if crc == want)
+                for v, want in (("v1", t.v1), ("v2", t.v2))}
+        t.confidence = max(conf.values())
+        t.state = "accurate" if t.confidence else "mismatch"
+        t.detail = (f"v1 {t.v1:08X} conf {conf['v1']}; v2 {t.v2:08X} conf {conf['v2']} "
+                    "(ripflow lookup, checksums from cyanrip)")
+    result.status = _status(ts)
+    log.info("own AccurateRip lookup: %s (%s)", result.status, url)
 
 
 def rip_disc(cfg: dict, drive: str) -> RipResult:
@@ -114,5 +179,7 @@ def rip_disc(cfg: dict, drive: str) -> RipResult:
                           "were written - AccurateRip status may be incomplete")
         if result.status == "VERIFIED":
             result.status = "UNKNOWN"
+    if result.status == "UNVERIFIED":
+        verify_accuraterip(result, cfg["_user_agent"])
     log.info("rip finished: %s, %d files, disc id %s", result.status, len(result.files), result.discid)
     return result

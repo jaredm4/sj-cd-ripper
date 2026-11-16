@@ -26,6 +26,8 @@ class Track:
     artist_ids: list[str]
     recording_id: str
     track_id: str
+    artist_sort: str = ""
+    isrcs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -42,8 +44,10 @@ class Album:
     status: str
     release_type: str
     barcode: str
-    label: str
-    catalog: str
+    labels: list[str]
+    catalogs: list[str]
+    asin: str
+    script: str
     media: str
     disc: int
     disc_total: int
@@ -232,23 +236,26 @@ def _credit(ac: list[dict]) -> tuple[str, list[str], list[str]]:
 def build_album(rel: dict, medium: dict) -> Album:
     artist, _, artist_ids = _credit(rel.get("artist-credit", []))
     rg = rel.get("release-group") or {}
-    info = (rel.get("label-info") or [{}])[0]
+    infos = rel.get("label-info") or []
+    labels = list(dict.fromkeys(n for i in infos if (n := (i.get("label") or {}).get("name"))))
+    catalogs = list(dict.fromkeys(c for i in infos if (c := i.get("catalog-number"))))
+    sort_of = lambda ac: "".join(c["artist"].get("sort-name", c["artist"]["name"]) + c.get("joinphrase", "") for c in ac)
     tracks = []
     for i, t in enumerate(medium["tracks"], 1):
         rec = t.get("recording") or {}
         ac = t.get("artist-credit") or rec.get("artist-credit") or rel.get("artist-credit", [])
         name, names, ids = _credit(ac)
         tracks.append(Track(i, t.get("title") or rec.get("title", f"Track {i:02d}"), name, names, ids,
-                            rec.get("id", ""), t.get("id", "")))
-    sort = "; ".join(c["artist"].get("sort-name", c["artist"]["name"]) for c in rel.get("artist-credit", []))
+                            rec.get("id", ""), t.get("id", ""), sort_of(ac), rec.get("isrcs") or []))
+    sort = sort_of(rel.get("artist-credit", []))
     types = [rg.get("primary-type") or "", *(rg.get("secondary-types") or [])]
     return Album(
         mbid=rel["id"], group_id=rg.get("id", ""), title=rel.get("title", ""), artist=artist,
         artist_sort=sort, artist_ids=artist_ids, date=rel.get("date") or "",
         original_date=rg.get("first-release-date") or "", country=rel.get("country") or "",
         status=(rel.get("status") or "").lower(), release_type="; ".join(t.lower() for t in types if t),
-        barcode=rel.get("barcode") or "", label=(info.get("label") or {}).get("name", ""),
-        catalog=info.get("catalog-number") or "", media=medium.get("format") or "",
+        barcode=rel.get("barcode") or "", labels=labels, catalogs=catalogs, asin=rel.get("asin") or "",
+        script=(rel.get("text-representation") or {}).get("script") or "", media=medium.get("format") or "",
         disc=medium.get("position", 1), disc_total=len(rel.get("media", [])) or 1, tracks=tracks)
 
 
@@ -263,7 +270,7 @@ def identify(mb: MusicBrainz, cfg: dict, infos: list[FlacInfo], *, discid: str |
     out = Identification()
     ntracks = len(infos)
     durations = [i.seconds for i in infos]
-    barcodes = {i.tag("BARCODE", "UPC") for i in infos}
+    barcodes = {i.tag("BARCODE", "UPC", "DISC_MCN", "MCN") for i in infos}
     barcode = barcodes.pop() if len(barcodes) == 1 else ""
     asins = {m.group(0) for i in infos for key in ("ASIN", "WWW", "URL")
              for m in [re.search(r"\bB0[0-9A-Z]{8}\b", i.tag(key))] if m}
