@@ -35,6 +35,7 @@ Run from the folder that contains `ripflow.toml`:
 | `python -m ripflow process <folder> --dry-run` | Shows the MusicBrainz candidates, the pick, and the planned file names. Changes nothing. |
 | `python -m ripflow process <folder> [--move]` | Runs the pipeline on existing FLACs. Copies into the library unless `--move`. |
 | `python -m ripflow process <folder> --release <mbid>` | Overrides the automatic release choice. |
+| `python -m ripflow process <folder> --ignore-local-art` | Ignores existing `cover.jpg` / embedded art and searches online again. |
 | `python -m ripflow verify <root>` | Whole-library integrity scan (replaces `check_flac.sh`, same TSV idea). |
 
 ## Running headless

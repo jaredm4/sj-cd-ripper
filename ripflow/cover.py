@@ -34,13 +34,26 @@ def _matches(artist: str, album: str, got_artist: str, got_album: str, various: 
 
 
 def _itunes(cfg, ua, artist, album, various, ntracks, notes):
-    """Apple's public catalogue search (the same artwork Apple Music shows)."""
-    hits, seen = [], 0
-    for term in dict.fromkeys([album if various else f"{artist} {album}", strip_edition(album, True)]):
-        url = (f"https://itunes.apple.com/search?term={quote(term, safe='')}&media=music&entity=album"
-               f"&limit=50&country={cfg['itunes_country']}")
-        results = json.loads(http_get(url, ua)).get("results", [])
-        seen += len(results)
+    """Apple's public catalogue search (the same artwork Apple Music shows).
+    Tries: artist + album search, album-title search, then the artist's full album list."""
+    base = "https://itunes.apple.com"
+    common = f"&media=music&country={cfg['itunes_country']}"
+    get = lambda url: json.loads(http_get(url, ua)).get("results", [])
+    bare = strip_edition(album, True)
+
+    def artist_albums():
+        found = get(f"{base}/search?term={quote(artist, safe='')}&entity=musicArtist&attribute=artistTerm&limit=10{common}")
+        ids = [r["artistId"] for r in found if r.get("artistId") and similar(artist, r.get("artistName", "")) >= 0.9]
+        return [r for i in ids[:2] for r in get(f"{base}/lookup?id={i}&entity=album&limit=200{common}")
+                if r.get("wrapperType") == "collection"]
+
+    queries = [
+        ("artist + album", lambda: get(f"{base}/search?term={quote(album if various else f'{artist} {album}', safe='')}&entity=album&limit=50{common}")),
+        ("album title", lambda: get(f"{base}/search?term={quote(bare, safe='')}&entity=album&attribute=albumTerm&limit=50{common}")),
+    ] + ([] if various or not artist else [("artist's album list", artist_albums)])
+    hits = []
+    for name, run in queries:
+        results = run()
         for r in results:
             score = _matches(artist, album, r.get("artistName", ""), r.get("collectionName", ""), various)
             art = r.get("artworkUrl100")
@@ -48,9 +61,11 @@ def _itunes(cfg, ua, artist, album, various, ntracks, notes):
                 score += 0.1 if r.get("trackCount") == ntracks else 0
                 big = re.sub(r"/\d+x\d+[a-z]*(-\d+)?\.(jpg|png)$", f"/{cfg['max_size']}x{cfg['max_size']}bb.jpg", art)
                 hits.append((score, big))
+        notes.append(f"iTunes/Apple Music, {name}: {len(results)} result(s), {len(hits)} matching")
         if hits:
             break
-    notes.append(f"iTunes/Apple Music search: {seen} result(s), {len(hits)} matching artist + album")
+        if results:      # show what came back, so a matching problem can be diagnosed from the report
+            notes.append("    e.g. " + "; ".join(f"{r.get('artistName')} / {r.get('collectionName')}" for r in results[:4]))
     return list(dict.fromkeys(u for _, u in sorted(hits, reverse=True)))[:3]
 
 
@@ -99,7 +114,7 @@ def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntr
         for name in names:
             try:
                 if name == "local":
-                    for d in local_dirs:
+                    for d in dict.fromkeys(Path(d).resolve() for d in local_dirs):
                         for f in sorted(Path(d).glob("*")):
                             if f.stem.lower() in ("cover", "folder", "front") and \
                                     f.suffix.lower() in (".jpg", ".jpeg", ".png"):

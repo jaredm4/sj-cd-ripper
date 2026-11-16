@@ -99,7 +99,7 @@ def _same(a: Path, b: Path) -> bool:
 
 def process_folder(cfg: dict, folder: Path, *, move: bool = False, dry_run: bool = False,
                    forced_release: str | None = None, rip: RipResult | None = None,
-                   no_cover: bool = False) -> list[Outcome]:
+                   no_cover: bool = False, ignore_local_art: bool = False) -> list[Outcome]:
     """Process every album found under `folder`. One album = one directory (+ disc number)."""
     folder = Path(folder)
     if cfg["paths"]["library"] is None:
@@ -121,10 +121,12 @@ def process_folder(cfg: dict, folder: Path, *, move: bool = False, dry_run: bool
         log.warning("no FLAC files under %s", folder)
     mb = MusicBrainz(cfg)
     return [_process_album(cfg, mb, g, infos, move=move, dry_run=dry_run, forced_release=forced_release,
-                           rip=rip, no_cover=no_cover) for g in groups.values()]
+                           rip=rip, no_cover=no_cover, ignore_local_art=ignore_local_art)
+            for g in groups.values()]
 
 
-def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip, no_cover) -> Outcome:
+def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip, no_cover,
+                   ignore_local_art=False) -> Outcome:
     src_dir = files[0].parent
     out = Outcome(source=src_dir)
     say = out.report.append
@@ -251,7 +253,8 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
     if cfg["cover"]["enabled"] and not no_cover and not unknown:
         cover, notes = find_cover(cfg, artist=artist, album=title, various=various, ntracks=len(items),
                                   mbid=album.mbid if album else "", group_id=album.group_id if album else "",
-                                  local_dirs=[dest_dir, src_dir], embedded_from=files[0])
+                                  local_dirs=[] if ignore_local_art else [dest_dir, src_dir],
+                                  embedded_from=None if ignore_local_art else files[0])
         say("\n== Cover art ==")
         for n in notes:
             say("  " + n)

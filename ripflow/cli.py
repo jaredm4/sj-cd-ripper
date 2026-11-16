@@ -26,6 +26,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="show what would happen, change nothing")
     p.add_argument("--release", help="force a specific MusicBrainz release id")
     p.add_argument("--no-cover", action="store_true")
+    p.add_argument("--ignore-local-art", action="store_true",
+                   help="ignore cover.jpg / embedded art already present and look online again")
 
     p = sub.add_parser("verify", help="integrity-scan a whole library (check_flac.sh replacement)")
     p.add_argument("root", type=Path)
@@ -42,7 +44,8 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "process":
         from .pipeline import process_folder
         outcomes = process_folder(cfg, a.folder, move=a.move, dry_run=a.dry_run,
-                                  forced_release=a.release, no_cover=a.no_cover)
+                                  forced_release=a.release, no_cover=a.no_cover,
+                                  ignore_local_art=a.ignore_local_art)
         return 0 if all(o.ok for o in outcomes) else 2
     from . import watch
     if a.cmd == "watch":
