@@ -41,6 +41,13 @@ _EDITION = re.compile(
     r"anniversary|reissue|mono|stereo|disc \d+|cd ?\d+)\b[^\)\]]*[\)\]]", re.I)
 
 
+def strip_edition(text: str, all_brackets: bool = False) -> str:
+    """"Hell: The Sequel (Deluxe Version)" -> "Hell: The Sequel". MusicBrainz keeps edition
+    notes out of the title, so they must go before searching."""
+    out = (re.sub(r"\s*[\(\[][^\)\]]*[\)\]]", "", text or "") if all_brackets else _EDITION.sub("", text or "")).strip()
+    return out or (text or "").strip()
+
+
 def norm(text: str) -> str:
     """Loose comparison form: no accents, punctuation, edition suffixes or leading 'the'."""
     text = _EDITION.sub("", text or "")

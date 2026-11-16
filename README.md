@@ -19,9 +19,10 @@ watch (daemon)        process <folder>
 3. **flac**: https://xiph.org/flac/download.html (put `flac.exe` on PATH or set its path in the config).
    If flac is missing, ffmpeg is used for the integrity check instead.
 4. **rsgain**: https://github.com/complexlogic/rsgain (on PATH, or set its path in the config).
-5. Copy `ripflow.example.toml` to `ripflow.toml`, set `library`, the cyanrip path, and
-   `drive_offset` (the read offset EAC already uses for your drive; without it AccurateRip
-   will not match).
+5. Copy `ripflow.example.toml` to `ripflow.toml` and set `library`. Everything else is commented
+   out and shows the default; uncomment what you need, at least the cyanrip path (if it is
+   not on PATH) and `drive_offset` (the read offset EAC uses for your drive; without it
+   AccurateRip will not match).
 
 ## Commands
 
@@ -64,14 +65,20 @@ album tags are pooled and ranked together. An existing `MUSICBRAINZ_ALBUMID` tag
 
 Ranking, most important first:
 
-1. Barcode equal to a `UPC`/`BARCODE` tag already on the files
-2. Official before promo/bootleg
-3. Not in `avoid_countries`
-4. Format: CD first for ripped discs; Digital Media, then CD, for existing FLAC files
-5. `prefer_countries` order, then any other country
-6. Has a barcode
-7. Most complete metadata (label, catalogue number, full date, packaging, cover on file, ...)
-8. Earliest date
+1. Barcode (`UPC`/`BARCODE` tag) or Amazon ASIN (from a `WWW`/`ASIN` tag) equal to the release's
+2. Most tracks whose `ISRC` tag matches the release's recordings
+3. Official before promo/bootleg
+4. Not in `avoid_countries`
+5. Explicit edition over clean (reversed when the files are tagged `Rating=Clean`)
+6. Format: CD first for ripped discs; Digital Media, then CD, for existing FLAC files
+7. `prefer_countries` order, then any other or no country
+8. Has a barcode
+9. Has front cover art on MusicBrainz
+10. Most complete metadata (label, catalogue number, full date, packaging, ...)
+11. Earliest date
+
+The tag search drops edition notes such as "(Deluxe Version)" from the album title, because
+MusicBrainz keeps those out of the title; the track count picks the right edition.
 
 Releases not matched by disc ID must also have matching track lengths. A folder in
 `Unknown/` that came from a ripflow rip keeps being treated as a CD rip.
@@ -91,7 +98,8 @@ folder name a trailing period also becomes `_` (`P.O.D_`), because Windows canno
 ## Tags
 
 On a MusicBrainz match all existing tags are dropped except the `[tags] keep` list
-(default: `ALBUM DYNAMIC RANGE`, `DYNAMIC RANGE`, `ISRC`, `MUSICBRAINZ_DISCID`, `UPC`).
+(default: `ALBUM DYNAMIC RANGE`, `DYNAMIC RANGE`, `ISRC`, `LYRICS`, `UNSYNCEDLYRICS`,
+`MUSICBRAINZ_DISCID`, `UPC`).
 
 ## Dynamic range and ReplayGain
 
@@ -103,7 +111,7 @@ On a MusicBrainz match all existing tags are dropped except the `[tags] keep` li
 ## Cover art
 
 Every source is tried and the largest square image wins: an existing
-`cover/folder/front.jpg|png`, Apple (iTunes search API), Cover Art Archive (original-size
+`cover/folder/front.jpg|png` or the art embedded in the first track, Apple (iTunes search API), Cover Art Archive (original-size
 front image), Deezer (1000 px). On equal size the earlier source wins. The image must be at
 least `min_size` (600) and is scaled down to `max_size` (3000). Apple and Deezer results are
 only considered when artist and album names match closely. Output: `cover.jpg` (original bytes kept when it is already a JPEG no

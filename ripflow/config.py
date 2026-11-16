@@ -31,6 +31,7 @@ DEFAULTS: dict = {
         "contact": "",          # your email or URL; MusicBrainz asks for one in the User-Agent
         "prefer_countries": ["US", "XW", "XE"],   # most preferred first; everything else after
         "avoid_countries": ["JP", "CN"],          # only used when nothing else fits
+        "prefer_explicit": True,                  # unless the files carry a Rating=Clean tag
         "max_track_diff_seconds": 7,
         "genres": 3,
     },
@@ -47,7 +48,8 @@ DEFAULTS: dict = {
     "tags": {
         # Existing tags that survive a retag (everything else is replaced by MusicBrainz data).
         # A trailing * matches a prefix.
-        "keep": ["ALBUM DYNAMIC RANGE", "DYNAMIC RANGE", "ISRC", "MUSICBRAINZ_DISCID", "UPC"],
+        "keep": ["ALBUM DYNAMIC RANGE", "DYNAMIC RANGE", "ISRC", "LYRICS", "UNSYNCEDLYRICS",
+                 "MUSICBRAINZ_DISCID", "UPC"],
     },
     "dr": {"enabled": True, "write_tags": True, "write_log": True},     # dynamic range (DR14)
     "rsgain": {"enabled": True, "args": ["easy", "--output", "{album}"]},

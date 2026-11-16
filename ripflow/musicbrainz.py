@@ -9,10 +9,12 @@ from urllib.parse import quote
 from .config import log
 from .discid import Toc
 from .flacfile import FlacInfo
-from .util import NetworkError, NotFound, http_get, similar
+import re
+
+from .util import NetworkError, NotFound, http_get, similar, strip_edition
 
 VARIOUS = "89ad4ac3-39f7-470e-963a-56509c546377"
-INC = "artist-credits+labels+recordings+release-groups"
+INC = "artist-credits+labels+recordings+release-groups+isrcs"
 
 
 @dataclass
@@ -90,10 +92,17 @@ class MusicBrainz:
 
     def search(self, artist: str, album: str, ntracks: int) -> list[dict]:
         esc = lambda s: s.replace("\\", " ").replace('"', " ")
-        q = f'release:"{esc(album)}" AND tracksmedium:{ntracks}'
-        if artist:
-            q += f' AND artist:"{esc(artist)}"'
-        return self._get("release", query=q.replace("+", " "), limit="15").get("releases", [])
+        hits: list[dict] = []
+        # MusicBrainz titles carry no "(Deluxe Version)"-style suffix: search without it,
+        # then without any bracketed part at all.
+        for title in dict.fromkeys([strip_edition(album), strip_edition(album, all_brackets=True)]):
+            q = f'release:"{esc(title)}" AND tracksmedium:{ntracks}'
+            if artist:
+                q += f' AND artist:"{esc(artist)}"'
+            hits = self._get("release", query=q.replace("+", " "), limit="50").get("releases", [])
+            if hits:
+                break
+        return hits
 
     def genres(self, group_id: str, limit: int) -> list[str]:
         data = self._get(f"release-group/{group_id}", inc="genres")
@@ -130,6 +139,10 @@ def _completeness(rel: dict, medium: dict) -> int:
     ]))
 
 
+_CLEAN = re.compile(r"\b(clean|edited|censored)\b", re.I)
+_EXPLICIT = re.compile(r"\bexplicit\b", re.I)
+
+
 def _pick_medium(rel: dict, ntracks: int, discid: str | None, durations: list[float],
                  max_diff: float, trust_length: bool) -> tuple[dict | None, float]:
     """Find the medium of this release that is our disc. Returns (medium, worst track diff)."""
@@ -151,19 +164,22 @@ def _pick_medium(rel: dict, ntracks: int, discid: str | None, durations: list[fl
 
 
 def choose(releases: list[dict], *, ntracks: int, discid: str | None, durations: list[float],
-           prefs: dict, exact: bool, source: str = "rip",
-           barcode: str = "") -> tuple[tuple[dict, dict] | None, list[str]]:
+           prefs: dict, exact: bool, source: str = "rip", barcode: str = "", asin: str = "",
+           isrcs: list[str] = (), want_clean: bool = False) -> tuple[tuple[dict, dict] | None, list[str]]:
     """Rank candidate releases; lower key wins. Returns ((release, medium) | None, report lines).
 
     Order of importance:
-      1. barcode equal to one already tagged on the files (UPC/BARCODE)
-      2. Official before promo/bootleg
-      3. not in avoid_countries
-      4. format: CD first for rips; Digital Media, then CD, for existing FLAC files
-      5. prefer_countries order, then everything else
-      6. has a barcode at all
-      7. most complete metadata
-      8. earliest date"""
+      1. barcode or Amazon ASIN equal to one already tagged on the files
+      2. most tracks whose ISRC tag matches the release's recordings
+      3. Official before promo/bootleg
+      4. not in avoid_countries
+      5. explicit vs clean edition (explicit unless the files say Rating=Clean)
+      6. format: CD first for rips; Digital Media, then CD, for existing FLAC files
+      7. prefer_countries order, then everything else
+      8. has a barcode at all
+      9. has front cover art on MusicBrainz
+     10. most complete metadata
+     11. earliest date"""
     prefer = [c.upper() for c in prefs["prefer_countries"]]
     avoid = {c.upper() for c in prefs["avoid_countries"]}
     status_rank = {"official": 0, "": 1, "promotion": 2, "pseudo-release": 3, "bootleg": 4}
@@ -176,23 +192,32 @@ def choose(releases: list[dict], *, ntracks: int, discid: str | None, durations:
             continue
         country = (rel.get("country") or "").upper()
         full = _completeness(rel, medium)
-        key = (0 if want and _digits(rel.get("barcode")) == want else 1,
+        hits = sum(1 for t, code in zip(medium.get("tracks") or [], isrcs)
+                   if code and code in (t.get("recording") or {}).get("isrcs", []))
+        note = rel.get("disambiguation") or ""
+        wrong_rating = bool((_EXPLICIT if want_clean else _CLEAN).search(note)) if prefs["prefer_explicit"] or want_clean else False
+        same_product = (want and _digits(rel.get("barcode")) == want) or (asin and rel.get("asin") == asin)
+        key = (0 if same_product else 1,
+               -hits,
                status_rank.get((rel.get("status") or "").lower(), 5),
                1 if country in avoid else 0,
+               1 if wrong_rating else 0,
                _format_tier(medium.get("format", ""), source),
                prefer.index(country) if country in prefer else len(prefer),
                0 if rel.get("barcode") else 1,
+               0 if (rel.get("cover-art-archive") or {}).get("front") else 1,
                -full,
                rel.get("date") or "9999",
                rel["id"])
-        ranked.append((key, rel, medium, worst, full))
+        ranked.append((key, rel, medium, worst, full, hits))
     ranked.sort(key=lambda r: r[0])
     lines = []
-    for i, (key, rel, medium, worst, full) in enumerate(ranked):
+    for i, (key, rel, medium, worst, full, hits) in enumerate(ranked):
         lines.append(f"{'->' if i == 0 else '  '} {rel.get('country') or '??':3} {rel.get('date') or '?':10} "
                      f"{medium.get('format') or '?':14} {rel.get('status') or '?':9} "
                      f"barcode={rel.get('barcode') or '-':14}{'*' if key[0] == 0 else ' '} "
-                     f"meta={full:2} maxdiff={worst:4.1f}s  {rel['id']}  {rel.get('title', '')}")
+                     f"isrc={hits:2} meta={full:2} maxdiff={worst:4.1f}s  {rel['id']}  {rel.get('title', '')}"
+                     + (f" ({rel['disambiguation']})" if rel.get("disambiguation") else ""))
     skipped = len(releases) - len(ranked)
     if skipped:
         lines.append(f"   ({skipped} release(s) dropped: no medium with {ntracks} tracks of matching length)")
@@ -240,8 +265,14 @@ def identify(mb: MusicBrainz, cfg: dict, infos: list[FlacInfo], *, discid: str |
     durations = [i.seconds for i in infos]
     barcodes = {i.tag("BARCODE", "UPC") for i in infos}
     barcode = barcodes.pop() if len(barcodes) == 1 else ""
-    pick = lambda rels, exact, did: choose(rels, ntracks=ntracks, discid=did, durations=durations,
-                                           prefs=prefs, exact=exact, source=source, barcode=barcode)
+    asins = {m.group(0) for i in infos for key in ("ASIN", "WWW", "URL")
+             for m in [re.search(r"\bB0[0-9A-Z]{8}\b", i.tag(key))] if m}
+    asin = asins.pop() if len(asins) == 1 else ""
+    want_clean = any(i.tag("RATING", "ITUNESADVISORY").lower() in ("clean", "2") for i in infos)
+    pick = lambda rels, exact, did: choose(
+        rels, ntracks=ntracks, discid=did, durations=durations, prefs=prefs, exact=exact, source=source,
+        barcode=barcode, asin=asin,
+        isrcs=[i.tag("ISRC").upper().replace("-", "") for i in infos], want_clean=want_clean)
 
     def accept(found, lines, method) -> bool:
         out.candidates = lines or out.candidates
@@ -296,7 +327,7 @@ def identify(mb: MusicBrainz, cfg: dict, infos: list[FlacInfo], *, discid: str |
         album = hint_album or (albums.pop() if len(albums) == 1 else "")
         if album and artist != cfg["naming"]["unknown_artist"]:
             hits = [h for h in mb.search(artist, album, ntracks)
-                    if similar(h.get("title", ""), album) >= 0.85 and h["id"] not in pool][:6]
+                    if similar(h.get("title", ""), album) >= 0.85 and h["id"] not in pool][:15]
             full = [mb.release(h["id"]) for h in hits]
             if artist:
                 full = [r for r in full if similar(_credit(r.get("artist-credit", []))[0], artist) >= 0.8]

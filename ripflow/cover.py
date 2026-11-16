@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from .config import log
+from .flacfile import FlacError, read_picture
 from .util import NetworkError, NotFound, http_get, similar
 
 
@@ -58,7 +59,8 @@ def _deezer(cfg, ua, artist, album, various, ntracks):
 
 
 def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntracks: int = 0,
-               mbid: str = "", group_id: str = "", local_dirs: list[Path] = ()) -> tuple[Cover | None, list[str]]:
+               mbid: str = "", group_id: str = "", local_dirs: list[Path] = (),
+               embedded_from: Path | None = None) -> tuple[Cover | None, list[str]]:
     """Try every configured source and keep the largest square image (ties: earlier source).
     Stops early only when an image already reaches max_size. Never raises."""
     c, ua, notes = cfg["cover"], cfg["_user_agent"], []
@@ -94,6 +96,9 @@ def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntr
                             if f.stem.lower() in ("cover", "folder", "front") and \
                                     f.suffix.lower() in (".jpg", ".jpeg", ".png"):
                                 yield f"local file {f.name}", f.read_bytes()
+                    art = read_picture(embedded_from) if embedded_from else None
+                    if art:
+                        yield f"embedded in {Path(embedded_from).name}", art
                 elif name == "itunes" and album:
                     for u in _itunes(c, ua, artist, album, various, ntracks):
                         yield "iTunes/Apple Music", http_get(u, ua)
@@ -108,7 +113,7 @@ def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntr
                                        http_get(f"https://coverartarchive.org/{kind}/{ident}/front", ua, timeout=60))
                             except NotFound:
                                 pass
-            except (NetworkError, NotFound, OSError, ValueError) as e:
+            except (NetworkError, NotFound, FlacError, OSError, ValueError) as e:
                 notes.append(f"{name}: {e}")
 
     for label, data in sources():

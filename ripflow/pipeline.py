@@ -247,7 +247,7 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
     if cfg["cover"]["enabled"] and not no_cover and not unknown:
         cover, notes = find_cover(cfg, artist=artist, album=title, various=various, ntracks=len(items),
                                   mbid=album.mbid if album else "", group_id=album.group_id if album else "",
-                                  local_dirs=[dest_dir, src_dir])
+                                  local_dirs=[dest_dir, src_dir], embedded_from=files[0])
         say("\n== Cover art ==")
         for n in notes:
             say("  " + n)

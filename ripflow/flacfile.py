@@ -108,6 +108,28 @@ def read_info(path: str | os.PathLike) -> FlacInfo:
     return info
 
 
+def read_picture(path: str | os.PathLike) -> bytes | None:
+    """Image bytes of the embedded front cover (or, failing that, the first embedded picture)."""
+    with open(path, "rb") as f:
+        blocks, _ = _read_blocks(f)
+    found = None
+    for t, d in blocks:
+        if t != PICTURE:
+            continue
+        try:
+            kind, n = struct.unpack_from(">II", d, 0)
+            pos = 8 + n
+            pos += 4 + struct.unpack_from(">I", d, pos)[0] + 16
+            size = struct.unpack_from(">I", d, pos)[0]
+            data = d[pos + 4:pos + 4 + size]
+        except struct.error:
+            continue
+        if kind == 3:
+            return data
+        found = found or data
+    return found
+
+
 def _vorbis_block(vendor: str, tags: dict[str, list[str]]) -> bytes:
     v = vendor.encode("utf-8")
     out = [struct.pack("<I", len(v)), v]

@@ -1,4 +1,8 @@
-# Copy to ripflow.toml (next to the ripflow folder) and edit.
+# Copy to ripflow.toml (next to the ripflow folder).
+#
+# Only `library` is required. Every other line is commented out and shows the built-in
+# default (or an example path): uncomment just the ones you want to change. Anything left
+# commented keeps following the defaults in ripflow/config.py, also when they change later.
 # Use forward slashes or single-quoted strings for Windows paths.
 
 [paths]
@@ -7,53 +11,54 @@ library = 'D:\Music'             # finished albums land here: <library>/<artist>
 # logs    = 'D:\ripflow\logs'    # ripflow.log, ATTENTION.log, reports/ (default: logs/ next to this file)
 
 [tools]
-cyanrip = 'C:\Tools\cyanrip-win64.exe'
-flac    = 'flac'                 # reference decoder for integrity checks; ffmpeg is used if missing
-ffmpeg  = 'ffmpeg'
-rsgain  = 'rsgain'
+# cyanrip = 'C:\Tools\cyanrip-win64.exe'   # default: cyanrip (found on PATH)
+# flac    = 'flac'                 # reference decoder for integrity checks; ffmpeg is used if missing
+# ffmpeg  = 'ffmpeg'
+# rsgain  = 'rsgain'
 
 [rip]
-drive = ""                       # "" = any drive with an audio CD, or e.g. "F:"
-drive_offset = ""                # your drive's read offset in samples - the same number EAC uses (e.g. 6, 667)
-eject = "always"                 # always | success (tray stays shut when something needs attention) | never
-beep = true                      # 1 beep = fine, 3 low beeps = check ATTENTION.log
-timeout_minutes = 180            # give up on a badly scratched disc after this long
+# drive = ""                       # "" = any drive with an audio CD, or e.g. "F:"
+# drive_offset = ""                # your drive's read offset in samples - the same number EAC uses (e.g. 6, 667)
+# eject = "always"                 # always | success (tray stays shut when something needs attention) | never
+# beep = true                      # 1 beep = fine, 3 low beeps = check ATTENTION.log
+# timeout_minutes = 180            # give up on a badly scratched disc after this long
 # Full cyanrip argument list, if you want to tune it ({drive}/{offset} are filled in):
 # args = ["-d", "{drive}", "-s", "{offset}", "-N", "-o", "flac", "-D", "rip"]
 
 [musicbrainz]
-contact = ""                     # your email or a URL - MusicBrainz asks API users to identify themselves
-prefer_countries = ["US", "XW", "XE"]   # most preferred first (XW = worldwide, XE = Europe); all others after
-avoid_countries = ["JP", "CN"]          # only chosen when nothing else matches
-max_track_diff_seconds = 7       # for non-disc-ID matches: reject releases whose track lengths differ more
-genres = 3                       # how many MusicBrainz genres to write (0 = none)
+# contact = ""                     # your email or a URL - MusicBrainz asks API users to identify themselves
+# prefer_countries = ["US", "XW", "XE"]   # most preferred first (XW = worldwide, XE = Europe); all others after
+# avoid_countries = ["JP", "CN"]          # only chosen when nothing else matches
+# prefer_explicit = true                  # explicit editions over clean ones, unless the files are tagged Rating=Clean
+# max_track_diff_seconds = 7       # for non-disc-ID matches: reject releases whose track lengths differ more
+# genres = 3                       # how many MusicBrainz genres to write (0 = none)
 
 [cover]
-enabled = true
-sources = ["local", "itunes", "coverartarchive", "deezer"]   # all are tried; on equal size the earlier one wins
-min_size = 600                   # the largest image found wins, but it must be at least this
-max_size = 3000                  # anything larger is scaled down to this
-jpeg_quality = 88                # only used when the image has to be re-encoded (PNG source or downscale)
-embed_size = 600
-embed_quality = 85
+# enabled = true
+# sources = ["local", "itunes", "coverartarchive", "deezer"]   # all are tried; on equal size the earlier one wins
+# min_size = 600                   # the largest image found wins, but it must be at least this
+# max_size = 3000                  # anything larger is scaled down to this
+# jpeg_quality = 88                # only used when the image has to be re-encoded (PNG source or downscale)
+# embed_size = 600
+# embed_quality = 85
 
 [tags]
 # Existing tags that survive a retag; everything else is replaced with MusicBrainz data.
 # A trailing * matches a prefix (e.g. "REPLAYGAIN_*").
-keep = ["ALBUM DYNAMIC RANGE", "DYNAMIC RANGE", "ISRC", "MUSICBRAINZ_DISCID", "UPC"]
+# keep = ["ALBUM DYNAMIC RANGE", "DYNAMIC RANGE", "ISRC", "LYRICS", "UNSYNCEDLYRICS", "MUSICBRAINZ_DISCID", "UPC"]
 
 [dr]
-enabled = true                   # measure dynamic range (needs numpy)
-write_tags = true                # DYNAMIC RANGE / ALBUM DYNAMIC RANGE
-write_log = true                 # dr.txt in the album folder
+# enabled = true                   # measure dynamic range (needs numpy)
+# write_tags = true                # DYNAMIC RANGE / ALBUM DYNAMIC RANGE
+# write_log = true                 # dr.txt in the album folder
 
 [rsgain]
-enabled = true
-args = ["easy", "--output", "{album}"]   # {album} = the finished album folder
+# enabled = true
+# args = ["easy", "--output", "{album}"]   # {album} = the finished album folder
 
 [naming]
-album_dir = "{albumartist}/{album}"          # also available: {year}
+# album_dir = "{albumartist}/{album}"          # also available: {year}
 # Defaults mirror the Picard preset: Artist/Album/Artist - Album - [disc-]NN Title
-track = "{albumartist} - {album} - {track:02d} {title}"
-track_multidisc = "{albumartist} - {album} - {disc}-{track:02d} {title}"   # also available: {artist}, {year}
-unknown_artist = "Unknown"
+# track = "{albumartist} - {album} - {track:02d} {title}"
+# track_multidisc = "{albumartist} - {album} - {disc}-{track:02d} {title}"   # also available: {artist}, {year}
+# unknown_artist = "Unknown"
