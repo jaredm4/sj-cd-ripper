@@ -36,17 +36,69 @@ def disc_signature(drive: str) -> str | None:
     return drive_state(drive)[0]
 
 
+def _windows_toc(drive: str) -> bytes | None:
+    """Raw table of contents straight from the drive (IOCTL_CDROM_READ_TOC), or None.
+    Unlike the TrackNN.cda files, this also works for Enhanced CDs, where Windows shows the
+    disc's data session instead of the audio tracks."""
+    import ctypes
+    from ctypes import wintypes
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateFileW.restype = wintypes.HANDLE
+    k.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                              wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    k.DeviceIoControl.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+                                  wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+    k.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = k.CreateFileW("\\\\.\\" + drive.rstrip("\\"), 0x80000000, 3, None, 3, 0, None)   # read, shared, existing
+    if handle in (None, wintypes.HANDLE(-1).value):
+        return None
+    try:
+        buf = ctypes.create_string_buffer(804)
+        got = wintypes.DWORD(0)
+        if not k.DeviceIoControl(handle, 0x00024000, None, 0, buf, len(buf), ctypes.byref(got), None):
+            return None
+        return buf.raw[:got.value]
+    finally:
+        k.CloseHandle(handle)
+
+
+def toc_tracks(toc: bytes) -> tuple[int, int]:
+    """(audio tracks, data tracks) in a raw CDROM_TOC: 4 header bytes, then 8 bytes per track."""
+    audio = data = 0
+    for pos in range(4, len(toc) - 7, 8):
+        control, number = toc[pos + 1] & 0x0F, toc[pos + 2]
+        if number == 0xAA:                 # lead-out entry
+            break
+        if control & 0x04:
+            data += 1
+        else:
+            audio += 1
+    return audio, data
+
+
 def drive_state(drive: str) -> tuple[str | None, str]:
     """(signature or None, plain description of what the drive currently shows)."""
     if WINDOWS:
-        # Windows presents audio tracks as tiny TrackNN.cda stubs holding the track
-        # positions and a disc serial - hashing them fingerprints the disc.
+        try:
+            toc = _windows_toc(drive)
+        except Exception as e:
+            toc = None
+            log.debug("TOC read failed on %s: %r", drive, e)
+        if toc and len(toc) >= 12:
+            audio, data = toc_tracks(toc)
+            fp = hashlib.sha1(toc).hexdigest()
+            if not audio:
+                return None, f"data disc ({data} data track(s), no audio)"
+            extra = f" + {data} data track(s) (Enhanced CD)" if data else ""
+            return fp, f"audio CD, {audio} audio tracks{extra}, fingerprint {fp[:8]}"
+        # No TOC (no disc, or the call is not allowed): fall back to the TrackNN.cda stubs
+        # that Windows shows for plain audio CDs.
         root = drive.rstrip("\\") + "\\"
         try:
             entries = os.listdir(root)
             names = sorted(n for n in entries if n.lower().endswith(".cda"))
             if not names:
-                return None, f"disc with {len(entries)} entries but no audio tracks (data or mixed-mode disc?)"
+                return None, f"disc with {len(entries)} entries but no audio tracks, and no readable TOC"
             h = hashlib.sha1()
             for n in names:
                 with open(root + n, "rb") as f:
