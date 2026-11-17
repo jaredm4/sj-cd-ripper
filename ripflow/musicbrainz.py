@@ -11,7 +11,7 @@ from .discid import Toc
 from .flacfile import FlacInfo
 import re
 
-from .util import NetworkError, NotFound, http_get, similar, strip_edition
+from .util import NetworkError, NotFound, ascii_punctuation, http_get, similar, strip_edition
 
 VARIOUS = "89ad4ac3-39f7-470e-963a-56509c546377"
 INC = "artist-credits+labels+recordings+release-groups+isrcs"
@@ -286,6 +286,8 @@ def identify(mb: MusicBrainz, cfg: dict, infos: list[FlacInfo], *, discid: str |
         if not found:
             return False
         out.album, out.method = build_album(*found), method
+        if cfg["tags"]["ascii_punctuation"]:
+            ascii_punctuation(out.album)
         try:
             if out.album.group_id and prefs["genres"]:
                 out.album.genres = mb.genres(out.album.group_id, prefs["genres"])

@@ -54,6 +54,10 @@ DEFAULTS: dict = {
     "tags": {
         # Existing tags that survive a retag (everything else is replaced by MusicBrainz data).
         # A trailing * matches a prefix.
+        # Typographic punctuation from MusicBrainz -> ASCII in tags and file names (curly quotes,
+        # dashes, the ellipsis character...). Same as Picard's "Convert Unicode punctuation
+        # characters to ASCII".
+        "ascii_punctuation": True,
         "keep": ["ALBUM DYNAMIC RANGE", "DYNAMIC RANGE", "ISRC", "LYRICS", "UNSYNCEDLYRICS",
                  "MUSICBRAINZ_DISCID", "UPC"],
     },

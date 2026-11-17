@@ -47,6 +47,8 @@ library = 'D:\Music'             # finished albums land here: <library>/<artist>
 # embed_quality = 85
 
 [tags]
+# ascii_punctuation = true         # typographic punctuation -> ASCII in tags and file names (’ -> ', ‐ -> -, … -> ...),
+#                                  # like Picard's "Convert Unicode punctuation characters to ASCII"
 # Existing tags that survive a retag; everything else is replaced with MusicBrainz data.
 # A trailing * matches a prefix (e.g. "REPLAYGAIN_*").
 # keep = ["ALBUM DYNAMIC RANGE", "DYNAMIC RANGE", "ISRC", "LYRICS", "UNSYNCEDLYRICS", "MUSICBRAINZ_DISCID", "UPC"]

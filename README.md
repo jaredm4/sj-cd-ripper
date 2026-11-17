@@ -100,6 +100,11 @@ folder name a trailing period also becomes `_` (`P.O.D_`), because Windows canno
 
 ## Tags
 
+Typographic punctuation in MusicBrainz names is converted to ASCII in tags and file names
+(`ascii_punctuation`), the same way Picard's "Convert Unicode punctuation characters to ASCII"
+option does: `It’s` -> `It's`, `Battle‐Axe` -> `Battle-Axe`, `…And Justice` -> `...And Justice`.
+The file-name rules then apply to the result, so a `"` becomes `_` and a leading `.` becomes `_`.
+
 On a MusicBrainz match all existing tags are dropped except the `[tags] keep` list
 (default: `ALBUM DYNAMIC RANGE`, `DYNAMIC RANGE`, `ISRC`, `LYRICS`, `UNSYNCEDLYRICS`,
 `MUSICBRAINZ_DISCID`, `UPC`).

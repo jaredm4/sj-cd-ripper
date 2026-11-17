@@ -41,6 +41,44 @@ _EDITION = re.compile(
     r"anniversary|reissue|mono|stereo|disc \d+|cd ?\d+)\b[^\)\]]*[\)\]]", re.I)
 
 
+def _punctuation_table() -> dict:
+    """Unicode punctuation -> ASCII, mirroring MusicBrainz Picard's "Convert Unicode
+    punctuation characters to ASCII" option, so names match a Picard-tagged library."""
+    groups = {
+        "'": "‘’‚‛′",
+        '"': "“”„‟″〝〞",
+        "-": "‐‑‒–—―﹘−•",
+        "<<": "«《︽≪", ">>": "»》︾≫",
+        "<": "‹〈︿", ">": "›〉﹀",
+        "[": "⁅〔〘〚︹﹝", "]": "⁆〕〙〛︺﹞",
+        "((": "｟⦅", "))": "｠⦆",
+        "|": "︱︲∣", "||": "‖∥",
+        "/": "⁄∕", "\\": "∖", "*": "⁎",
+        ",": "︑﹑､", ".": "︒｡",
+        "L": "Ŀ", "l": "ŀ",
+        "": "­​",                      # soft hyphen, zero-width space: dropped
+    }
+    return {ord(ch): ascii_ for ascii_, chars in groups.items() for ch in chars}
+
+
+_PUNCTUATION = _punctuation_table()
+
+
+def ascii_punctuation(value):
+    """Typographic punctuation -> ASCII: curly quotes, dashes, the ellipsis character (...),
+    special spaces, ligatures and other compatibility forms. Works on a string, a list, or a
+    dataclass (every string inside it, recursively); anything else is returned unchanged."""
+    if isinstance(value, str):
+        # NFKC handles the compatibility characters (ellipsis, odd spaces, ligatures, fullwidth forms)
+        return unicodedata.normalize("NFKC", value).translate(_PUNCTUATION)
+    if isinstance(value, list):
+        return [ascii_punctuation(v) for v in value]
+    if hasattr(value, "__dataclass_fields__"):
+        for name in value.__dataclass_fields__:
+            setattr(value, name, ascii_punctuation(getattr(value, name)))
+    return value
+
+
 def strip_edition(text: str, all_brackets: bool = False) -> str:
     """"Hell: The Sequel (Deluxe Version)" -> "Hell: The Sequel". MusicBrainz keeps edition
     notes out of the title, so they must go before searching."""

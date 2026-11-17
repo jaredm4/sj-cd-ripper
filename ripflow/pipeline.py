@@ -18,7 +18,7 @@ from .discid import Toc, toc_from_param, toc_from_samples
 from .flacfile import FlacError, FlacInfo, read_info, write_tags
 from .musicbrainz import Album, MusicBrainz, identify
 from .ripper import RipResult
-from .util import lead_int, natural_key, safe_component, safe_field
+from .util import ascii_punctuation, lead_int, natural_key, safe_component, safe_field
 from .verify import check_many, pick_decoder
 
 
@@ -227,14 +227,16 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
                                if ident.offline else " (add the disc on MusicBrainz, then re-run "
                                                      "`ripflow process` on the folder)"))
 
-    fields = {"albumartist": safe_field(artist), "album": safe_field(title), "year": year or "0000",
-              "disc": disc}
+    plain = ascii_punctuation if cfg["tags"]["ascii_punctuation"] else (lambda s: s)
+    fields = {"albumartist": safe_field(plain(artist)), "album": safe_field(plain(title)),
+              "year": year or "0000", "disc": disc}
     dest_dir = Path(cfg["paths"]["library"]).joinpath(
         *[safe_component(part.format(**fields), is_dir=True) for part in naming["album_dir"].split("/")])
     pattern = naming["track_multidisc"] if disc_total > 1 else naming["track"]
     targets = [dest_dir / (safe_component(pattern.format(
-                   track=it.track, title=safe_field(it.title),
-                   artist=safe_field(it.info.tag("ARTIST") if it.tags is None else it.tags.get("ARTIST", [artist])[0]),
+                   track=it.track, title=safe_field(plain(it.title)),
+                   artist=safe_field(plain(it.info.tag("ARTIST") if it.tags is None
+                                           else it.tags.get("ARTIST", [artist])[0])),
                    **fields)) + ".flac") for it in items]
     out.dest = dest_dir
     say(f"\n== Destination ==\n  {dest_dir}")
