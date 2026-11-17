@@ -57,7 +57,8 @@ def _album_tags(cfg: dict, album: Album, n: int, info: FlacInfo, discid: str | N
     one = lambda v: [str(v)] if v not in ("", None) else []
     tags = {
         "TITLE": one(t.title), "ARTIST": one(t.artist), "ARTISTS": t.artists, "ARTISTSORT": one(t.artist_sort),
-        "ALBUM": one(album.title), "ALBUMARTIST": one(album.artist), "ALBUMARTISTSORT": one(album.artist_sort),
+        "ALBUM": one(album.title), "ALBUMARTIST": one(album.artist), "ALBUMARTISTS": album.artists,
+        "ALBUMARTISTSORT": one(album.artist_sort),
         "TRACKNUMBER": one(n), "TRACKTOTAL": one(len(album.tracks)), "TOTALTRACKS": one(len(album.tracks)),
         "DISCNUMBER": one(album.disc), "DISCTOTAL": one(album.disc_total), "TOTALDISCS": one(album.disc_total),
         "DATE": one(album.date), "ORIGINALDATE": one(album.original_date),
@@ -166,6 +167,10 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
     if all(numbers) and len(set(numbers)) == len(numbers):
         files = [p for _, p in sorted(zip(numbers, files), key=lambda x: x[0])]
     flacs = [infos[p] for p in files]
+    if rip and len(rip.tracks) == len(flacs):       # ISRCs from the rip log, if the files lack them
+        for info, t in zip(flacs, rip.tracks):
+            if t.isrc and not info.tag("ISRC"):
+                info.tags["ISRC"] = [t.isrc]
 
     txt_id, txt_toc = _read_discid_txt(src_dir)
     tag_ids = {i.tag("MUSICBRAINZ_DISCID", "DISCID") for i in flacs}

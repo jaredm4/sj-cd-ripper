@@ -38,6 +38,7 @@ class Album:
     artist: str
     artist_sort: str
     artist_ids: list[str]
+    artists: list[str]            # the individual credited album artists
     date: str
     original_date: str
     country: str
@@ -233,7 +234,7 @@ def _credit(ac: list[dict]) -> tuple[str, list[str], list[str]]:
 
 
 def build_album(rel: dict, medium: dict) -> Album:
-    artist, _, artist_ids = _credit(rel.get("artist-credit", []))
+    artist, artist_names, artist_ids = _credit(rel.get("artist-credit", []))
     rg = rel.get("release-group") or {}
     infos = rel.get("label-info") or []
     labels = list(dict.fromkeys(n for i in infos if (n := (i.get("label") or {}).get("name"))))
@@ -250,7 +251,7 @@ def build_album(rel: dict, medium: dict) -> Album:
     types = [rg.get("primary-type") or "", *(rg.get("secondary-types") or [])]
     return Album(
         mbid=rel["id"], group_id=rg.get("id", ""), title=rel.get("title", ""), artist=artist,
-        artist_sort=sort, artist_ids=artist_ids, date=rel.get("date") or "",
+        artist_sort=sort, artist_ids=artist_ids, artists=artist_names, date=rel.get("date") or "",
         original_date=rg.get("first-release-date") or "", country=rel.get("country") or "",
         status=(rel.get("status") or "").lower(), release_type="; ".join(t.lower() for t in types if t),
         barcode=rel.get("barcode") or "", labels=labels, catalogs=catalogs, asin=rel.get("asin") or "",

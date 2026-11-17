@@ -24,6 +24,7 @@ class TrackRip:
     v2: int | None = None
     start: int | None = None     # first / last sector (LSN) of the track on the disc
     end: int | None = None
+    isrc: str = ""               # the track's ISRC as read from the disc
 
 
 @dataclass
@@ -77,6 +78,8 @@ def parse_log(text: str) -> tuple[str | None, list[TrackRip], str]:
             t = TrackRip(int(num), "unverified", detail="cyanrip did not find the disc in AccurateRip")
         crcs = {v: int(crc, 16) for v, crc, _ in results}
         t.v1, t.v2 = crcs.get("1"), crcs.get("2")
+        m = re.search(r"(?im)^\s*isrc:\s*([A-Z0-9-]{12,15})\s*$", block)
+        t.isrc = m.group(1).upper().replace("-", "") if m else ""
         for name, attr in (("Start", "start"), ("End", "end")):
             m = re.search(rf"{name} LSN:\s+(\d+)", block)
             setattr(t, attr, int(m.group(1)) if m else None)
@@ -88,19 +91,23 @@ def parse_log(text: str) -> tuple[str | None, list[TrackRip], str]:
 # cyanrip computes the checksums but its database lookup sometimes reports "not found"
 # for discs that are there. The checksums in its log are all we need to ask ourselves.
 
+def cddb_id(starts: list[int], leadout: int) -> str:
+    """Classic CDDB/freedb disc id from ALL track start sectors (LSN) and the disc lead-out."""
+    digits = lambda secs: sum(int(c) for c in str(secs))
+    return "%08x" % ((sum(digits((s + 150) // 75) for s in starts) % 255) << 24
+                     | ((leadout + 150) // 75 - (starts[0] + 150) // 75) << 8 | len(starts))
+
+
 def accuraterip_url(starts: list[int], leadout: int, cddb: str | None = None) -> str:
-    """Database URL for a disc, from audio-track start sectors and the sector after the last
-    audio track (LSN, 0-based). `cddb` is the disc's CDDB/freedb id if known: on an Enhanced CD
-    it also covers the data track, so it cannot be derived from the audio tracks alone."""
+    """Database URL for a disc, from audio-track start sectors and a lead-out sector (LSN,
+    0-based). `cddb` overrides the CDDB id part: on an Enhanced CD that id also covers the
+    data track, so it cannot be derived from the audio tracks alone."""
     n = len(starts)
     id1 = (sum(starts) + leadout) & 0xFFFFFFFF
     id2 = (sum(max(s, 1) * i for i, s in enumerate(starts, 1)) + leadout * (n + 1)) & 0xFFFFFFFF
-    digits = lambda secs: sum(int(c) for c in str(secs))
-    if not cddb:
-        cddb = "%08x" % ((sum(digits((s + 150) // 75) for s in starts) % 255) << 24
-                         | ((leadout + 150) // 75 - (starts[0] + 150) // 75) << 8 | n)
+    cddb = (cddb or cddb_id(starts, leadout)).lower()
     return (f"http://www.accuraterip.com/accuraterip/{id1 & 0xF:x}/{id1 >> 4 & 0xF:x}/{id1 >> 8 & 0xF:x}/"
-            f"dBAR-{n:03d}-{id1:08x}-{id2:08x}-{cddb.lower()}.bin")
+            f"dBAR-{n:03d}-{id1:08x}-{id2:08x}-{cddb}.bin")
 
 
 def parse_accuraterip(data: bytes) -> list[list[tuple[int, int]]]:
@@ -117,18 +124,26 @@ def parse_accuraterip(data: bytes) -> list[list[tuple[int, int]]]:
     return pressings
 
 
-def verify_accuraterip(result: RipResult, ua: str, cddb: str | None = None,
-                       disc_leadout: int | None = None) -> None:
+def verify_accuraterip(result: RipResult, ua: str, log_cddb: str | None = None,
+                       layout: tuple[list[int], int] | None = None) -> None:
     """Re-check an UNVERIFIED rip against AccurateRip ourselves. Updates result in place.
-    disc_leadout: the disc's real lead-out sector. On an Enhanced CD that lies after the data
-    track, and AccurateRip's disc id is built from it rather than from the end of the audio."""
+
+    layout = (data-track start sectors, real disc lead-out) when known. On an Enhanced CD
+    AccurateRip's address uses the disc's real lead-out (after the data track) and a CDDB id
+    that counts the data track too, so the audio tracks alone give the wrong address."""
     ts = result.tracks
     if not ts or any(t.v1 is None or t.v2 is None or t.start is None or t.end is None for t in ts):
         return
     note = lambda text: setattr(result, "message", (result.message + " " if result.message else "") + text)
-    starts, pressings, tried = [t.start for t in ts], None, []
-    for leadout in dict.fromkeys(x for x in (disc_leadout, ts[-1].end + 1) if x):
-        url = accuraterip_url(starts, leadout, cddb)
+    starts, audio_end = [t.start for t in ts], ts[-1].end + 1
+    urls = []
+    if layout and layout[0]:
+        data_starts, leadout = layout
+        full = cddb_id(starts + data_starts, leadout)
+        urls += [accuraterip_url(starts, leadout, full), accuraterip_url(starts, audio_end, full)]
+    urls += [accuraterip_url(starts, audio_end, c) for c in (None, log_cddb)]
+    pressings, tried = None, []
+    for url in dict.fromkeys(urls):
         tried.append(url)
         try:
             pressings = parse_accuraterip(http_get(url, ua))
@@ -152,22 +167,22 @@ def verify_accuraterip(result: RipResult, ua: str, cddb: str | None = None,
     log.info("own AccurateRip lookup: %s (%s)", result.status, url)
 
 
-def _disc_leadout(log_text: str, drive: str) -> int | None:
-    """Real lead-out sector (LSN) of the disc: from the data-track entry in the cyanrip log if
-    it gives one, otherwise straight from the drive's table of contents (Windows)."""
-    m = re.search(r"(?ms)^Track \d+ is data.*?End LSN:\s+(\d+)", log_text)
-    if m:
-        return int(m.group(1)) + 1
+def _disc_layout(log_text: str, drive: str) -> tuple[list[int], int] | None:
+    """(data-track start sectors, real disc lead-out), as LSNs. Read from the drive's table of
+    contents (Windows); falls back to the data-track entry in the cyanrip log if it has sectors."""
     try:
         from .watch import WINDOWS, _windows_toc
         toc = _windows_toc(drive) if WINDOWS else None
+        data, lsn = [], lambda pos: (toc[pos + 5] * 60 + toc[pos + 6]) * 75 + toc[pos + 7] - 150
         for pos in range(4, len(toc or b"") - 7, 8):
-            if toc[pos + 2] == 0xAA:                       # lead-out entry: 0, minutes, seconds, frames
-                _, mm, ss, ff = toc[pos + 4:pos + 8]
-                return (mm * 60 + ss) * 75 + ff - 150
+            if toc[pos + 2] == 0xAA:                       # lead-out entry
+                return data, lsn(pos)
+            if toc[pos + 1] & 0x04:                        # data track
+                data.append(lsn(pos))
     except Exception as e:
-        log.debug("could not read the disc lead-out: %r", e)
-    return None
+        log.debug("could not read the disc layout: %r", e)
+    m = re.search(r"(?ms)^Track \d+ is data.*?Start LSN:\s+(\d+).*?End LSN:\s+(\d+)", log_text)
+    return ([int(m.group(1))], int(m.group(2)) + 1) if m else None
 
 
 def _run_with_progress(cmd: list[str], cwd: Path, console: Path, timeout: float, every: float) -> tuple[int, bool]:
@@ -245,6 +260,6 @@ def rip_disc(cfg: dict, drive: str) -> RipResult:
             result.status = "UNKNOWN"
     if result.status == "UNVERIFIED":
         m = re.search(r"(?im)^\s*CDDB ID:\s*([0-9A-F]{8})\s*$", text)
-        verify_accuraterip(result, cfg["_user_agent"], m.group(1) if m else None, _disc_leadout(text, drive))
+        verify_accuraterip(result, cfg["_user_agent"], m.group(1) if m else None, _disc_layout(text, drive))
     log.info("rip finished: %s, %d files, disc id %s", result.status, len(result.files), result.discid)
     return result
