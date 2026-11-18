@@ -67,6 +67,7 @@ class Identification:
     candidates: list[str] = field(default_factory=list)   # human-readable, for the report
     notes: list[str] = field(default_factory=list)
     offline: bool = False                                  # MusicBrainz could not be reached
+    skipped: bool = False                                  # the user chose to leave the album alone
 
 
 class MusicBrainz:
@@ -167,10 +168,21 @@ def _pick_medium(rel: dict, ntracks: int, discid: str | None, durations: list[fl
     return best, best_diff
 
 
-def choose(releases: list[dict], *, ntracks: int, discid: str | None, durations: list[float],
-           prefs: dict, exact: bool, source: str = "rip", barcode: str = "", asin: str = "",
-           isrcs: list[str] = (), want_clean: bool = False) -> tuple[tuple[dict, dict] | None, list[str]]:
-    """Rank candidate releases; lower key wins. Returns ((release, medium) | None, report lines).
+@dataclass
+class Candidate:
+    key: tuple
+    release: dict
+    medium: dict
+    worst: float          # largest track-length difference, seconds
+    meta: int             # metadata completeness score
+    isrc_hits: int
+
+
+def rank(releases: list[dict], *, ntracks: int, discid: str | None, durations: list[float],
+         prefs: dict, exact: bool, source: str = "rip", barcode: str = "", asin: str = "",
+         isrcs: list[str] = (), want_clean: bool = False) -> list[Candidate]:
+    """Rank candidate releases, best first (lowest key). Releases with no medium matching
+    these files are left out.
 
     Order of importance:
       1. barcode or Amazon ASIN equal to one already tagged on the files
@@ -213,19 +225,43 @@ def choose(releases: list[dict], *, ntracks: int, discid: str | None, durations:
                -full,
                rel.get("date") or "9999",
                rel["id"])
-        ranked.append((key, rel, medium, worst, full, hits))
-    ranked.sort(key=lambda r: r[0])
+        ranked.append(Candidate(key, rel, medium, worst, full, hits))
+    ranked.sort(key=lambda c: c.key)
+    return ranked
+
+
+def tier_size(ranked: list[Candidate]) -> int:
+    """How many candidates match the files as well as the top one does: same barcode/ASIN
+    result, same ISRC matches, same release status and same explicit/clean fit. They differ
+    only in preferences (format, country, completeness...), so any of them could be the
+    right one - that is when it is worth asking."""
+    if not ranked:
+        return 0
+    head = lambda c: (c.key[0], c.key[1], c.key[2], c.key[4])
+    return sum(1 for c in ranked if head(c) == head(ranked[0]))
+
+
+def report_lines(ranked: list[Candidate], *, total: int, ntracks: int, chosen: str | None = None) -> list[str]:
+    """One line per candidate for the report; `->` marks the release used (default: the top one)."""
+    chosen = chosen or (ranked[0].release["id"] if ranked else None)
     lines = []
-    for i, (key, rel, medium, worst, full, hits) in enumerate(ranked):
-        lines.append(f"{'->' if i == 0 else '  '} {rel.get('country') or '??':3} {rel.get('date') or '?':10} "
-                     f"{medium.get('format') or '?':14} {rel.get('status') or '?':9} "
-                     f"barcode={rel.get('barcode') or '-':14}{'*' if key[0] == 0 else ' '} "
-                     f"isrc={hits:2} meta={full:2} maxdiff={worst:4.1f}s  {rel['id']}  {rel.get('title', '')}"
+    for c in ranked:
+        rel = c.release
+        lines.append(f"{'->' if rel['id'] == chosen else '  '} {rel.get('country') or '??':3} {rel.get('date') or '?':10} "
+                     f"{c.medium.get('format') or '?':14} {rel.get('status') or '?':9} "
+                     f"barcode={rel.get('barcode') or '-':14}{'*' if c.key[0] == 0 else ' '} "
+                     f"isrc={c.isrc_hits:2} meta={c.meta:2} maxdiff={c.worst:4.1f}s  {rel['id']}  {rel.get('title', '')}"
                      + (f" ({rel['disambiguation']})" if rel.get("disambiguation") else ""))
-    skipped = len(releases) - len(ranked)
-    if skipped:
-        lines.append(f"   ({skipped} release(s) dropped: no medium with {ntracks} tracks of matching length)")
-    return ((ranked[0][1], ranked[0][2]) if ranked else None), lines
+    if total - len(ranked) > 0:
+        lines.append(f"   ({total - len(ranked)} release(s) dropped: no medium with {ntracks} tracks of matching length)")
+    return lines
+
+
+def choose(releases: list[dict], **kw) -> tuple[tuple[dict, dict] | None, list[str]]:
+    """Best release and the report lines (non-interactive). Same arguments as rank()."""
+    ranked = rank(releases, **kw)
+    lines = report_lines(ranked, total=len(releases), ntracks=kw["ntracks"])
+    return ((ranked[0].release, ranked[0].medium) if ranked else None), lines
 
 
 def _credit(ac: list[dict]) -> tuple[str, list[str], list[str]]:
@@ -262,10 +298,16 @@ def build_album(rel: dict, medium: dict) -> Album:
 # ---- the identification ladder -----------------------------------------------
 
 def identify(mb: MusicBrainz, cfg: dict, infos: list[FlacInfo], *, discid: str | None,
-             toc: Toc | None, forced_release: str | None = None, source: str = "rip") -> Identification:
+             toc: Toc | None, forced_release: str | None = None, source: str = "rip",
+             chooser=None) -> Identification:
     """Find the release. source="rip": the disc ID decides, text search is only a fallback.
     source="files": disc ID / TOC hits and a text search on the existing tags are pooled, so a
-    Digital Media release can win over the CD pressing the track lengths happen to match."""
+    Digital Media release can win over the CD pressing the track lengths happen to match.
+
+    chooser: optional callable(ranked, tier, resolve) used when several candidates fit the
+    files equally well (see tier_size). It returns (release, medium) to use, or None to skip
+    the album. `resolve(mbid)` fetches any release by id and returns (release, medium) or an
+    error message. Without a chooser the top-ranked release is used."""
     prefs = cfg["musicbrainz"]
     out = Identification()
     ntracks = len(infos)
@@ -276,15 +318,42 @@ def identify(mb: MusicBrainz, cfg: dict, infos: list[FlacInfo], *, discid: str |
              for m in [re.search(r"\bB0[0-9A-Z]{8}\b", i.tag(key))] if m}
     asin = asins.pop() if len(asins) == 1 else ""
     want_clean = any(i.tag("RATING", "ITUNESADVISORY").lower() in ("clean", "2") for i in infos)
-    pick = lambda rels, exact, did: choose(
+    isrcs = [i.tag("ISRC").upper().replace("-", "") for i in infos]
+    ranker = lambda rels, exact, did: rank(
         rels, ntracks=ntracks, discid=did, durations=durations, prefs=prefs, exact=exact, source=source,
-        barcode=barcode, asin=asin,
-        isrcs=[i.tag("ISRC").upper().replace("-", "") for i in infos], want_clean=want_clean)
+        barcode=barcode, asin=asin, isrcs=isrcs, want_clean=want_clean)
 
-    def accept(found, lines, method) -> bool:
-        out.candidates = lines or out.candidates
+    def resolve(mbid: str):
+        """A release the user typed in: it only has to have a disc with the right track count."""
+        try:
+            found = ranker([mb.release(mbid)], True, discid)
+        except NotFound:
+            return f"release {mbid} not found on MusicBrainz"
         if not found:
+            return f"release {mbid} has no disc with {ntracks} tracks"
+        return found[0].release, found[0].medium
+
+    def accept(rels: list[dict], exact: bool, did: str | None, method: str) -> bool:
+        ranked = ranker(rels, exact, did)
+        out.candidates = report_lines(ranked, total=len(rels), ntracks=ntracks) or out.candidates
+        if not ranked:
             return False
+        found = (ranked[0].release, ranked[0].medium)
+        tier = tier_size(ranked)
+        if chooser and tier > 1:
+            found = chooser(ranked, tier, resolve)
+            if found is None:
+                out.skipped, out.method = True, method
+                out.notes.append("you chose to skip this album")
+                return True
+            if found[0]["id"] != ranked[0].release["id"]:
+                out.notes.append("release chosen by you (ripflow recommended the first one listed)")
+                known = {c.release["id"] for c in ranked}
+                extra = [] if found[0]["id"] in known else ranker([found[0]], True, did)
+                out.candidates = report_lines(extra + ranked, total=len(rels) + len(extra),
+                                              ntracks=ntracks, chosen=found[0]["id"])
+            else:
+                out.notes.append("you confirmed the recommended release")
         out.album, out.method = build_album(*found), method
         if cfg["tags"]["ascii_punctuation"]:
             ascii_punctuation(out.album)
@@ -304,7 +373,7 @@ def identify(mb: MusicBrainz, cfg: dict, infos: list[FlacInfo], *, discid: str |
             if not mbid:
                 continue
             try:
-                if accept(*pick([mb.release(mbid)], exact, discid), method):
+                if accept([mb.release(mbid)], exact, discid, method):
                     return out
                 out.notes.append(f"{method} {mbid}: track count/lengths do not match these files")
             except NotFound:
@@ -326,7 +395,7 @@ def identify(mb: MusicBrainz, cfg: dict, infos: list[FlacInfo], *, discid: str |
             elif data.get("title"):          # a "CD stub": user-submitted title/artist only
                 hint_artist, hint_album = data.get("artist", ""), data["title"]
                 out.notes.append(f"disc ID matches only a CD stub: {hint_artist} / {hint_album}")
-        if source == "rip" and pool and accept(*pick(list(pool.values()), bool(attached), attached),
+        if source == "rip" and pool and accept(list(pool.values()), bool(attached), attached,
                                                "disc ID" if attached else "fuzzy TOC (track lengths)"):
             return out
 
@@ -342,7 +411,7 @@ def identify(mb: MusicBrainz, cfg: dict, infos: list[FlacInfo], *, discid: str |
                 full = [r for r in full if similar(_credit(r.get("artist-credit", []))[0], artist) >= 0.8]
             pool.update((r["id"], r) for r in full)
             out.notes.append(f"tag search ({artist or '?'} / {album}): {len(full)} more release(s)")
-        if pool and accept(*pick(list(pool.values()), False, attached),
+        if pool and accept(list(pool.values()), False, attached,
                            "disc/TOC lookup + tag search, ranked together"):
             return out
     except NetworkError as e:

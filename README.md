@@ -36,6 +36,8 @@ Run from the folder that contains `ripflow.toml`:
 | `python -m ripflow process <folder> [--move]` | Runs the pipeline on existing FLACs. Copies into the library unless `--move`. |
 | `python -m ripflow process <folder> --release <mbid>` | Overrides the automatic release choice. |
 | `python -m ripflow process <folder> --ignore-local-art` | Ignores existing `cover.jpg` / embedded art and searches online again. |
+| `python -m ripflow process <folder> --only-local-art` | Uses only a `cover`/`folder`/`front` `.jpg`/`.png`/`.webp` in the album folder (newest file wins). No online lookup; embedded art is ignored and replaced with a fresh 600 px copy. |
+| `python -m ripflow process <folder> --auto` | Never asks which release to use (see below). |
 | `python -m ripflow verify <root>` | Whole-library integrity scan (replaces `check_flac.sh`, same TSV idea). |
 
 ## Running headless
@@ -82,6 +84,12 @@ Ranking, most important first:
 
 The tag search drops edition notes such as "(Deluxe Version)" from the album title, because
 MusicBrainz keeps those out of the title; the track count picks the right edition.
+
+When `process` runs at a terminal and several releases fit the files equally well (same
+barcode/ASIN result, same ISRC matches, same status and explicit/clean fit), it lists them and
+asks: Enter takes the recommended one, a number picks another, `a` shows weaker candidates
+too, a pasted release id or link uses that release, and `s` skips the album. `watch`, `rip`
+and `process --auto` never ask.
 
 Releases not matched by disc ID must also have matching track lengths. A folder in
 `Unknown/` that came from a ripflow rip keeps being treated as a CD rip.

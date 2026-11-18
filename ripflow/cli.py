@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from . import __version__
@@ -25,9 +26,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--move", action="store_true", help="move files into the library (default: copy)")
     p.add_argument("--dry-run", action="store_true", help="show what would happen, change nothing")
     p.add_argument("--release", help="force a specific MusicBrainz release id")
-    p.add_argument("--no-cover", action="store_true")
-    p.add_argument("--ignore-local-art", action="store_true",
-                   help="ignore cover.jpg / embedded art already present and look online again")
+    p.add_argument("--auto", action="store_true",
+                   help="never ask which release to use; always take the recommended one")
+    art = p.add_mutually_exclusive_group()
+    art.add_argument("--no-cover", action="store_true", help="leave cover art alone")
+    art.add_argument("--ignore-local-art", action="store_true",
+                     help="ignore cover.jpg / embedded art already present and look online again")
+    art.add_argument("--only-local-art", action="store_true",
+                     help="use only a cover/folder/front .jpg/.png/.webp in the album folder (newest wins); "
+                          "no online lookups, embedded art ignored and replaced")
 
     p = sub.add_parser("verify", help="integrity-scan a whole library (check_flac.sh replacement)")
     p.add_argument("root", type=Path)
@@ -43,9 +50,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if scan_library(a.root, pick_decoder(cfg), a.out, a.jobs or cfg["verify"]["jobs"]) else 0
     if a.cmd == "process":
         from .pipeline import process_folder
+        from .prompt import ask_release
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
         outcomes = process_folder(cfg, a.folder, move=a.move, dry_run=a.dry_run,
                                   forced_release=a.release, no_cover=a.no_cover,
-                                  ignore_local_art=a.ignore_local_art)
+                                  ignore_local_art=a.ignore_local_art, only_local_art=a.only_local_art,
+                                  chooser=None if a.auto or not interactive else ask_release)
         return 0 if all(o.ok for o in outcomes) else 2
     from . import watch
     if a.cmd == "watch":

@@ -100,7 +100,8 @@ def _same(a: Path, b: Path) -> bool:
 
 def process_folder(cfg: dict, folder: Path, *, move: bool = False, dry_run: bool = False,
                    forced_release: str | None = None, rip: RipResult | None = None,
-                   no_cover: bool = False, ignore_local_art: bool = False) -> list[Outcome]:
+                   no_cover: bool = False, ignore_local_art: bool = False, only_local_art: bool = False,
+                   chooser=None) -> list[Outcome]:
     """Process every album found under `folder`. One album = one directory (+ disc number)."""
     folder = Path(folder)
     if cfg["paths"]["library"] is None:
@@ -122,12 +123,13 @@ def process_folder(cfg: dict, folder: Path, *, move: bool = False, dry_run: bool
         log.warning("no FLAC files under %s", folder)
     mb = MusicBrainz(cfg)
     return [_process_album(cfg, mb, g, infos, move=move, dry_run=dry_run, forced_release=forced_release,
-                           rip=rip, no_cover=no_cover, ignore_local_art=ignore_local_art)
+                           rip=rip, no_cover=no_cover, ignore_local_art=ignore_local_art,
+                           only_local_art=only_local_art, chooser=chooser)
             for g in groups.values()]
 
 
 def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip, no_cover,
-                   ignore_local_art=False) -> Outcome:
+                   ignore_local_art=False, only_local_art=False, chooser=None) -> Outcome:
     src_dir = files[0].parent
     out = Outcome(source=src_dir)
     say = out.report.append
@@ -185,10 +187,14 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
     from_cd = bool(rip or txt_id or any(src_dir.glob("rip*.log")))
     say(f"  treated as: {'CD rip (prefer CD releases)' if from_cd else 'existing files (prefer Digital Media)'}")
     ident = identify(mb, cfg, flacs, discid=discid, toc=toc, forced_release=forced_release,
-                     source="rip" if from_cd else "files")
+                     source="rip" if from_cd else "files", chooser=chooser)
     say(f"  method: {ident.method}")
     for line in ident.candidates + [f"  note: {n}" for n in ident.notes]:
         say("  " + line)
+    if ident.skipped:
+        out.label = src_dir.name
+        say("\n(skipped at your request - nothing was changed)")
+        return _finish(cfg, out, dry_run)
 
     naming = cfg["naming"]
     album = ident.album
@@ -257,11 +263,12 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
 
     # 4. cover art -------------------------------------------------------------
     cover = None
-    if cfg["cover"]["enabled"] and not no_cover and not unknown:
+    if cfg["cover"]["enabled"] and not no_cover and (not unknown or only_local_art):
         cover, notes = find_cover(cfg, artist=artist, album=title, various=various, ntracks=len(items),
                                   mbid=album.mbid if album else "", group_id=album.group_id if album else "",
                                   local_dirs=[] if ignore_local_art else [dest_dir, src_dir],
-                                  embedded_from=None if ignore_local_art else files[0])
+                                  embedded_from=None if ignore_local_art else files[0],
+                                  only_local=only_local_art)
         say("\n== Cover art ==")
         for n in notes:
             say("  " + n)

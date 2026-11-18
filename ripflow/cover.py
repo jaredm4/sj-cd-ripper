@@ -83,18 +83,22 @@ def _deezer(cfg, ua, artist, album, various, ntracks, notes):
 
 def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntracks: int = 0,
                mbid: str = "", group_id: str = "", local_dirs: list[Path] = (),
-               embedded_from: Path | None = None) -> tuple[Cover | None, list[str]]:
+               embedded_from: Path | None = None, only_local: bool = False) -> tuple[Cover | None, list[str]]:
     """Largest usable image from `sources`; only if those yield nothing, the largest from
-    `fallback_sources`. Slightly non-square images are centre-cropped to a square. Never raises."""
+    `fallback_sources`. Slightly non-square images are centre-cropped to a square. Never raises.
+
+    only_local: use nothing but cover/folder/front image files in `local_dirs` (no embedded
+    art, no online lookups). If there are several, the most recently modified one wins, so a
+    file you just dropped in overrides older art."""
     c, ua, notes = cfg["cover"], cfg["_user_agent"], []
     try:
         from PIL import Image
     except ImportError:
         return None, ["Pillow is not installed (pip install pillow) - cover art skipped"]
 
-    best: tuple[int, bytes, str] | None = None
+    best: tuple[float, bytes, str] | None = None
 
-    def consider(data: bytes, label: str) -> bool:
+    def consider(data: bytes, label: str, mtime: float | None) -> bool:
         nonlocal best
         try:
             with Image.open(io.BytesIO(data)) as im:
@@ -106,9 +110,10 @@ def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntr
             notes.append(f"{label}: {w}x{h} is too far from square (probably not a plain front cover), skipped")
             return False
         notes.append(f"{label}: {w}x{h}" + ("" if w == h else f" (will be cropped to {min(w, h)}x{min(w, h)})"))
-        if min(w, h) >= c["min_size"] and (best is None or min(w, h) > best[0]):
-            best = (min(w, h), data, label)
-        return min(w, h) >= c["max_size"]
+        score = mtime if only_local else min(w, h)      # newest file / largest image wins
+        if min(w, h) >= c["min_size"] and (best is None or score > best[0]):
+            best = (score, data, label)
+        return not only_local and min(w, h) >= c["max_size"]
 
     def sources(names):
         for name in names:
@@ -117,31 +122,33 @@ def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntr
                     for d in dict.fromkeys(Path(d).resolve() for d in local_dirs):
                         for f in sorted(Path(d).glob("*")):
                             if f.stem.lower() in ("cover", "folder", "front") and \
-                                    f.suffix.lower() in (".jpg", ".jpeg", ".png"):
-                                yield f"local file {f.name}", f.read_bytes()
-                    art = read_picture(embedded_from) if embedded_from else None
+                                    f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
+                                yield f"local file {f.name}", f.read_bytes(), f.stat().st_mtime
+                    art = read_picture(embedded_from) if embedded_from and not only_local else None
                     if art:
-                        yield f"embedded in {Path(embedded_from).name}", art
+                        yield f"embedded in {Path(embedded_from).name}", art, None
                 elif name == "itunes" and album:
                     for u in _itunes(c, ua, artist, album, various, ntracks, notes):
-                        yield "iTunes/Apple Music", http_get(u, ua)
+                        yield "iTunes/Apple Music", http_get(u, ua), None
                 elif name == "deezer" and album:
                     for u in _deezer(c, ua, artist, album, various, ntracks, notes):
-                        yield "Deezer", http_get(u, ua)
+                        yield "Deezer", http_get(u, ua), None
                 elif name == "coverartarchive":
                     for kind, ident in (("release", mbid), ("release-group", group_id)):
                         if ident:
                             try:
                                 yield (f"Cover Art Archive ({kind})",
-                                       http_get(f"https://coverartarchive.org/{kind}/{ident}/front", ua, timeout=60))
+                                       http_get(f"https://coverartarchive.org/{kind}/{ident}/front", ua, timeout=60),
+                                       None)
                             except NotFound:
                                 notes.append(f"Cover Art Archive ({kind}): no front image")
             except (NetworkError, NotFound, FlacError, OSError, ValueError) as e:
                 notes.append(f"{name}: {e}")
 
-    for group in (c["sources"], c["fallback_sources"]):
-        for label, data in sources(group):
-            if consider(data, label):
+    groups = (["local"],) if only_local else (c["sources"], c["fallback_sources"])
+    for group in groups:
+        for label, data, mtime in sources(group):
+            if consider(data, label, mtime):
                 break
         if best is not None:
             break
@@ -149,6 +156,8 @@ def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntr
         return None, notes
 
     _, data, label = best
+    if only_local:
+        notes.append(f"newest local image used: {label}")
     with Image.open(io.BytesIO(data)) as im:
         im.load()
         original_jpeg = im.format == "JPEG" and im.mode == "RGB" and im.width == im.height
