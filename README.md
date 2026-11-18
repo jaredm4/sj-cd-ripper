@@ -38,6 +38,7 @@ Run from the folder that contains `ripflow.toml`:
 | `python -m ripflow process <folder> --ignore-local-art` | Ignores existing `cover.jpg` / embedded art and searches online again. |
 | `python -m ripflow process <folder> --only-local-art` | Uses only a `cover`/`folder`/`front` `.jpg`/`.png`/`.webp` in the album folder (newest file wins). No online lookup; embedded art is ignored and replaced with a fresh 600 px copy. |
 | `python -m ripflow process <folder> --auto` | Never asks which release to use (see below). |
+| `python -m ripflow covers <root> [--dry-run]` | Updates cover art across an existing library (see below). Audio files are not touched. |
 | `python -m ripflow verify <root>` | Whole-library integrity scan (replaces `check_flac.sh`, same TSV idea). |
 
 ## Running headless
@@ -116,6 +117,66 @@ The file-name rules then apply to the result, so a `"` becomes `_` and a leading
 On a MusicBrainz match all existing tags are dropped except the `[tags] keep` list
 (default: `ALBUM DYNAMIC RANGE`, `DYNAMIC RANGE`, `ISRC`, `LYRICS`, `UNSYNCEDLYRICS`,
 `MUSICBRAINZ_DISCID`, `UPC`).
+
+### Animated covers
+
+When Apple Music has an animated cover for the album, it is also saved as an animated
+`cover.webp` next to `cover.jpg` (`animated`, on by default). This follows the approach of
+[apple-music-animated-artworks](https://github.com/m8tec/apple-music-animated-artworks): the
+album found by the iTunes search is looked up through the Apple Music web player's own
+interface, and its video stream is converted with ffmpeg (which needs WebP support; the usual
+Windows builds have it). That interface is not a documented public API, so it may stop working;
+any failure is noted in the report and the rest of the album is processed as normal.
+
+- Size: `animated_max_size` (default 1000 px), `animated_quality` (75), `animated_fps` (0 =
+  source). Animated WebP files grow quickly; the report shows each file's size.
+- An existing `cover.webp` is kept; `--ignore-local-art` makes a new one.
+- A still (not animated) `cover.webp` is renamed to `cover-static.webp`, so it no longer competes
+  with `cover.jpg`; it remains available as a still-cover source.
+- Jellyfin and Navidrome show one album image, so the still cover can't sit beside the
+  animation as `cover.jpg` (the server would pick either). When an animated `cover.webp` exists, the still
+  is saved as `cover-static.jpg` (`animated_still_name`), a name neither server treats as album
+  art; otherwise it is `cover.jpg`. Either way it is the image the embedded 600 px art is made
+  from. Re-runs rename between the two as needed, and rename the earlier name `cover orig.jpg`.
+- The embedded art is always the 600 px still, so players that read the files directly (and
+  per-track art in Navidrome) still get a plain image.
+- The still and embedded art always come from a still image, never the animation (unless
+  nothing else is available, then its first frame is used).
+
+### Updating a whole library: `covers`
+
+`python -m ripflow covers D:\Music` walks the library and, for every album folder (one with a
+`cover.jpg`, or with music files and no `folder.jpg`, which marks an artist folder):
+
+- adds Apple Music's animated `cover.webp` where there is none yet and Apple has one
+- finds a still cover where there is none, the same way `process` does (nothing found is fine)
+- moves the still to `cover-static.jpg` when an animated cover exists, or back to `cover.jpg`
+  when it does not
+
+Artist and album come from the first track's tags (FLAC directly, other formats through
+`ffprobe`), or from the folder names. What was learned is remembered in the album's `ripflow.json`
+file (see below), so albums Apple has no animated cover for, or with no still cover anywhere,
+are skipped next time (`--recheck` looks again). `--dry-run` looks
+everything up but writes nothing; `--limit N` stops after N albums. Results go to the console
+and to `logs/reports/<date> covers.tsv`.
+
+Apple allows about 20 searches a minute, so iTunes searches are spaced 3 s apart
+(`itunes_interval`) and each artist's album list is fetched once per run, so later albums by the
+same artist need no search at all. The Apple Music lookup for an animated cover is spaced 1 s
+(`apple_music_interval`). Albums whose `ripflow.json` already has the answer make no calls, so
+there is nothing to wait for. Both settings go under `[cover]`; the summary shows how many calls
+were made. Expect a few seconds per album; if Apple
+starts refusing requests the run waits, then stops, and a re-run continues where it left off.
+
+### Album memory: `ripflow.json`
+
+Each album folder can hold a small `ripflow.json` file (JSON) with facts ripflow learned and does
+not need to look up again: the album's Apple Music id, whether Apple has an animated cover, and
+whether any still cover exists. It lives with the album, so it survives moving the library,
+another machine or a fresh copy of ripflow. `process`, `watch` and `covers` read and update it;
+it never holds log output. Delete it to make ripflow forget an album. (Versions before this
+kept the cover memory in `logs/covers-state.json`; `covers` still reads that file once and
+moves each album's entry into its `ripflow.json`, after which the old file can be deleted.)
 
 ## Dynamic range and ReplayGain
 

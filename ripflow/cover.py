@@ -4,13 +4,14 @@ from __future__ import annotations
 import io
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
 
 from .config import log
 from .flacfile import FlacError, read_picture
-from .util import NetworkError, NotFound, http_get, similar, strip_edition
+from .util import NetworkError, NotFound, http_get, norm, similar, strip_edition
 
 
 @dataclass
@@ -33,24 +34,134 @@ def _matches(artist: str, album: str, got_artist: str, got_album: str, various: 
     return (a + b) / 2 if a >= 0.8 and b >= 0.85 else 0.0
 
 
-def _itunes(cfg, ua, artist, album, various, ntracks, notes):
+_artist_albums: dict = {}
+_last_itunes = 0.0
+stats = {"itunes": 0}           # iTunes search calls made this run (shown by `covers`)
+
+
+def _itunes_get(url: str, ua: str, interval: float) -> bytes:
+    """Apple allows roughly 20 search calls a minute; keep them `interval` seconds apart."""
+    global _last_itunes
+    wait = interval - (time.monotonic() - _last_itunes)
+    if wait > 0:
+        time.sleep(wait)
+    try:
+        stats["itunes"] += 1
+        return http_get(url, ua)
+    finally:
+        _last_itunes = time.monotonic()
+
+
+def is_animated(path: Path) -> bool:
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            return bool(getattr(im, "is_animated", False))
+    except Exception:
+        return False
+
+
+LEGACY_STILL_STEMS = ("cover orig",)     # earlier name of the still beside an animated cover
+
+
+def migrate_legacy_names(folder: Path, cfg: dict, dry_run: bool = False) -> list[str]:
+    """Rename stills saved under an earlier name ("cover orig.jpg/.webp") to the current one
+    ("cover-static.jpg/.webp"). An identical copy under the old name is removed; a different
+    one is left alone and reported."""
+    new_stem = Path(cfg["cover"]["animated_still_name"]).stem
+    done = []
+    for stem in LEGACY_STILL_STEMS:
+        if stem.lower() == new_stem.lower():
+            continue
+        for ext in (".jpg", ".webp"):
+            old, new = folder / (stem + ext), folder / (new_stem + ext)
+            if not old.is_file():
+                continue
+            verb = "would be " if dry_run else ""
+            if not new.is_file():
+                if not dry_run:
+                    old.rename(new)
+                done.append(f"{old.name} {verb}renamed to {new.name}")
+            elif old.read_bytes() == new.read_bytes():
+                if not dry_run:
+                    old.unlink()
+                done.append(f"{old.name} {verb}removed (same as {new.name})")
+            else:
+                done.append(f"{old.name} left alone ({new.name} exists and differs)")
+    return done
+
+
+def park_static_webp(folder: Path, cfg: dict, dry_run: bool = False) -> str | None:
+    """A still (non-animated) cover.webp would compete with cover.jpg for the album image, and
+    keeps the animated-cover search from running. Rename it to the alternate still name with a
+    .webp extension ("cover-static.webp"); it stays available as a still-cover source.
+    Returns what was (or, with dry_run, would be) done, or None if there was nothing to do."""
+    webp = folder / "cover.webp"
+    if not webp.is_file() or is_animated(webp):
+        return None
+    parked = folder / (Path(cfg["cover"]["animated_still_name"]).stem + ".webp")
+    if parked.is_file():
+        if parked.read_bytes() != webp.read_bytes():
+            return f"cover.webp (not animated) left alone: {parked.name} exists and differs"
+        if not dry_run:
+            webp.unlink()
+        return f"cover.webp (not animated) {'would be ' if dry_run else ''}removed (same as {parked.name})"
+    if not dry_run:
+        webp.rename(parked)
+    return f"cover.webp (not animated) {'would be ' if dry_run else ''}renamed to {parked.name}"
+
+
+def settle_still(folder: Path, cfg: dict, jpeg: bytes | None = None) -> str:
+    """Put the still cover under the right name and say what was done.
+
+    Servers show one album image. With an animated cover.webp the still goes under
+    `animated_still_name` (default "cover-static.jpg"), which they do not pick up, so they show
+    the animation; otherwise it is cover.jpg. `jpeg` given: write it. Otherwise just move an
+    existing still to the right name. The copy under the other name is removed when it is
+    redundant (just replaced, or byte-identical); two different files are both left alone."""
+    names = ["cover.jpg", cfg["cover"]["animated_still_name"]]
+    if is_animated(folder / "cover.webp"):
+        names.reverse()
+    right, wrong = folder / names[0], folder / names[1]
+    if jpeg is not None:
+        right.write_bytes(jpeg)
+        if wrong.is_file():
+            wrong.unlink()
+        return f"saved as {right.name}"
+    if not wrong.is_file():
+        return f"{right.name} kept" if right.is_file() else "none"
+    if not right.is_file():
+        wrong.rename(right)
+        return f"{wrong.name} renamed to {right.name}"
+    if wrong.read_bytes() == right.read_bytes():
+        wrong.unlink()
+        return f"{right.name} kept, duplicate {wrong.name} removed"
+    return f"both {right.name} and {wrong.name} exist and differ - left alone"
+
+
+def _itunes(cfg, ua, artist, album, various, ntracks, notes, found=None):
     """Apple's public catalogue search (the same artwork Apple Music shows).
     Tries: artist + album search, album-title search, then the artist's full album list."""
     base = "https://itunes.apple.com"
     common = f"&media=music&country={cfg['itunes_country']}"
-    get = lambda url: json.loads(http_get(url, ua)).get("results", [])
+    get = lambda url: json.loads(_itunes_get(url, ua, cfg["itunes_interval"])).get("results", [])
     bare = strip_edition(album, True)
 
     def artist_albums():
-        found = get(f"{base}/search?term={quote(artist, safe='')}&entity=musicArtist&attribute=artistTerm&limit=10{common}")
-        ids = [r["artistId"] for r in found if r.get("artistId") and similar(artist, r.get("artistName", "")) >= 0.9]
-        return [r for i in ids[:2] for r in get(f"{base}/lookup?id={i}&entity=album&limit=200{common}")
-                if r.get("wrapperType") == "collection"]
+        key = (norm(artist), cfg["itunes_country"])
+        if key not in _artist_albums:          # one lookup per artist per run (a library has many per artist)
+            found = get(f"{base}/search?term={quote(artist, safe='')}&entity=musicArtist&attribute=artistTerm&limit=10{common}")
+            ids = [r["artistId"] for r in found if r.get("artistId") and similar(artist, r.get("artistName", "")) >= 0.9]
+            _artist_albums[key] = [r for i in ids[:2] for r in get(f"{base}/lookup?id={i}&entity=album&limit=200{common}")
+                                   if r.get("wrapperType") == "collection"]
+        return _artist_albums[key]
 
-    queries = [
+    # The artist's own album list is the most reliable route (Apple's text search often misses),
+    # and it is cached, so it goes first.
+    queries = ([] if various or not artist else [("artist's album list", artist_albums)]) + [
         ("artist + album", lambda: get(f"{base}/search?term={quote(album if various else f'{artist} {album}', safe='')}&entity=album&limit=50{common}")),
         ("album title", lambda: get(f"{base}/search?term={quote(bare, safe='')}&entity=album&attribute=albumTerm&limit=50{common}")),
-    ] + ([] if various or not artist else [("artist's album list", artist_albums)])
+    ]
     hits = []
     for name, run in queries:
         results = run()
@@ -60,13 +171,29 @@ def _itunes(cfg, ua, artist, album, various, ntracks, notes):
             if score and art:
                 score += 0.1 if r.get("trackCount") == ntracks else 0
                 big = re.sub(r"/\d+x\d+[a-z]*(-\d+)?\.(jpg|png)$", f"/{cfg['max_size']}x{cfg['max_size']}bb.jpg", art)
-                hits.append((score, big))
+                hits.append((score, big, r.get("collectionId")))
         notes.append(f"iTunes/Apple Music, {name}: {len(results)} result(s), {len(hits)} matching")
         if hits:
             break
         if results:      # show what came back, so a matching problem can be diagnosed from the report
             notes.append("    e.g. " + "; ".join(f"{r.get('artistName')} / {r.get('collectionName')}" for r in results[:4]))
-    return list(dict.fromkeys(u for _, u in sorted(hits, reverse=True)))[:3]
+    hits.sort(key=lambda h: h[0], reverse=True)
+    if found is not None and hits and hits[0][2]:
+        found["apple_album_id"] = str(hits[0][2])
+    return list(dict.fromkeys(u for _, u, _ in hits))[:3]
+
+
+def apple_album_id(cfg: dict, *, artist: str, album: str, various: bool = False, ntracks: int = 0,
+                   notes: list[str] | None = None) -> str | None:
+    """Apple Music id of the album (same matching as the cover search), or None."""
+    found: dict = {}
+    try:
+        _itunes(cfg["cover"], cfg["_user_agent"], artist, album, various, ntracks,
+                notes if notes is not None else [], found)
+    except (NetworkError, NotFound, ValueError) as e:
+        if notes is not None:
+            notes.append(f"iTunes/Apple Music: {e}")
+    return found.get("apple_album_id")
 
 
 def _deezer(cfg, ua, artist, album, various, ntracks, notes):
@@ -83,13 +210,18 @@ def _deezer(cfg, ua, artist, album, various, ntracks, notes):
 
 def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntracks: int = 0,
                mbid: str = "", group_id: str = "", local_dirs: list[Path] = (),
-               embedded_from: Path | None = None, only_local: bool = False) -> tuple[Cover | None, list[str]]:
+               embedded_from: Path | None = None, only_local: bool = False,
+               found: dict | None = None) -> tuple[Cover | None, list[str]]:
     """Largest usable image from `sources`; only if those yield nothing, the largest from
     `fallback_sources`. Slightly non-square images are centre-cropped to a square. Never raises.
 
     only_local: use nothing but cover/folder/front image files in `local_dirs` (no embedded
     art, no online lookups). If there are several, the most recently modified one wins, so a
-    file you just dropped in overrides older art."""
+    file you just dropped in overrides older art.
+
+    An animated image (e.g. an animated cover.webp) is only used as the still cover when
+    nothing else qualifies; its first frame is used then. `found` (a dict), if given,
+    receives "apple_album_id" when the iTunes search matched the album."""
     c, ua, notes = cfg["cover"], cfg["_user_agent"], []
     try:
         from PIL import Image
@@ -97,14 +229,21 @@ def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntr
         return None, ["Pillow is not installed (pip install pillow) - cover art skipped"]
 
     best: tuple[float, bytes, str] | None = None
+    animated_fallback: tuple[bytes, str] | None = None
 
     def consider(data: bytes, label: str, mtime: float | None) -> bool:
-        nonlocal best
+        nonlocal best, animated_fallback
         try:
             with Image.open(io.BytesIO(data)) as im:
                 w, h = im.size
+                moving = getattr(im, "is_animated", False)
         except Exception as e:
             notes.append(f"{label}: unreadable image ({e})")
+            return False
+        if moving:
+            notes.append(f"{label}: {w}x{h} animated - not used as the still cover")
+            if min(w, h) >= c["min_size"] and animated_fallback is None:
+                animated_fallback = (data, label)
             return False
         if max(w, h) > c["max_aspect"] * min(w, h):
             notes.append(f"{label}: {w}x{h} is too far from square (probably not a plain front cover), skipped")
@@ -121,14 +260,15 @@ def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntr
                 if name == "local":
                     for d in dict.fromkeys(Path(d).resolve() for d in local_dirs):
                         for f in sorted(Path(d).glob("*")):
-                            if f.stem.lower() in ("cover", "folder", "front") and \
+                            if f.stem.lower() in ("cover", "folder", "front", Path(c["animated_still_name"]).stem.lower(),
+                                                  *LEGACY_STILL_STEMS) and \
                                     f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
                                 yield f"local file {f.name}", f.read_bytes(), f.stat().st_mtime
                     art = read_picture(embedded_from) if embedded_from and not only_local else None
                     if art:
                         yield f"embedded in {Path(embedded_from).name}", art, None
                 elif name == "itunes" and album:
-                    for u in _itunes(c, ua, artist, album, various, ntracks, notes):
+                    for u in _itunes(c, ua, artist, album, various, ntracks, notes, found):
                         yield "iTunes/Apple Music", http_get(u, ua), None
                 elif name == "deezer" and album:
                     for u in _deezer(c, ua, artist, album, various, ntracks, notes):
@@ -152,6 +292,10 @@ def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntr
                 break
         if best is not None:
             break
+    if best is None and animated_fallback:
+        data, label = animated_fallback
+        best = (0, data, label)
+        notes.append(f"nothing else usable: first frame of {label} used as the still cover")
     if best is None:
         return None, notes
 

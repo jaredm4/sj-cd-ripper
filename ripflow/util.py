@@ -17,10 +17,10 @@ class NetworkError(Exception):
     pass
 
 
-def http_get(url: str, ua: str, timeout: int = 30, retries: int = 3) -> bytes:
+def http_get(url: str, ua: str, timeout: int = 30, retries: int = 3, headers: dict | None = None) -> bytes:
     last: Exception | None = None
     for attempt in range(retries):
-        req = urllib.request.Request(url, headers={"User-Agent": ua, "Accept": "*/*"})
+        req = urllib.request.Request(url, headers={"User-Agent": ua, "Accept": "*/*", **(headers or {})})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.read()

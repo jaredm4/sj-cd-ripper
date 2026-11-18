@@ -36,6 +36,14 @@ def main(argv: list[str] | None = None) -> int:
                      help="use only a cover/folder/front .jpg/.png/.webp in the album folder (newest wins); "
                           "no online lookups, embedded art ignored and replaced")
 
+    p = sub.add_parser("covers", help="update cover art across an existing library (animated covers, "
+                                      "missing stills, still naming); audio files are not modified")
+    p.add_argument("root", type=Path)
+    p.add_argument("--dry-run", action="store_true", help="look things up, write nothing")
+    p.add_argument("--recheck", action="store_true",
+                   help="also look again at albums an earlier run found no animated cover for")
+    p.add_argument("--limit", type=int, default=0, help="only the first N album folders (for a test)")
+
     p = sub.add_parser("verify", help="integrity-scan a whole library (check_flac.sh replacement)")
     p.add_argument("root", type=Path)
     p.add_argument("--out", type=Path, default=Path("flac_report.tsv"))
@@ -48,6 +56,9 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "verify":
         from .verify import pick_decoder, scan_library
         return 1 if scan_library(a.root, pick_decoder(cfg), a.out, a.jobs or cfg["verify"]["jobs"]) else 0
+    if a.cmd == "covers":
+        from .library import update_covers
+        return update_covers(cfg, a.root, dry_run=a.dry_run, recheck=a.recheck, limit=a.limit)
     if a.cmd == "process":
         from .pipeline import process_folder
         from .prompt import ask_release

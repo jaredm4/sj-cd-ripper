@@ -13,7 +13,7 @@ library = 'D:\Music'             # finished albums land here: <library>/<artist>
 [tools]
 # cyanrip = 'C:\Tools\cyanrip-win64.exe'   # default: cyanrip (found on PATH)
 # flac    = 'flac'                 # reference decoder for integrity checks; ffmpeg is used if missing
-# ffmpeg  = 'ffmpeg'
+# ffmpeg  = 'ffmpeg'                 # needed for animated covers (with WebP support)
 # rsgain  = 'rsgain'
 
 [rip]
@@ -37,8 +37,16 @@ library = 'D:\Music'             # finished albums land here: <library>/<artist>
 
 [cover]
 # enabled = true
+# itunes_country = "US"           # Apple storefront used for covers
+# itunes_interval = 3.0            # seconds between iTunes searches (Apple allows about 20 a minute)
+# apple_music_interval = 1.0       # seconds between Apple Music lookups (animated covers)
 # sources = ["local", "itunes"]                      # the largest image from these wins
 # fallback_sources = ["coverartarchive", "deezer"]   # used only when none of the above has a usable image
+# animated = true                 # also save Apple Music's animated cover (if the album has one) as cover.webp
+# animated_max_size = 1000         # px; animated WebP files grow quickly with size
+# animated_quality = 75            # WebP quality, 0-100
+# animated_fps = 0                 # 0 = keep the source frame rate
+# animated_still_name = "cover-static.jpg"   # still cover's name when an animated cover.webp exists (else cover.jpg)
 # max_aspect = 1.15                # up to this far from square is centre-cropped to a square; beyond it, skipped
 # min_size = 600                   # the largest image found wins, but it must be at least this
 # max_size = 3000                  # anything larger is scaled down to this

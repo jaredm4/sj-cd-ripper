@@ -15,7 +15,7 @@ DEFAULTS: dict = {
         "staging": "",   # default: <config dir>/work
         "logs": "",      # default: <config dir>/logs
     },
-    "tools": {"cyanrip": "cyanrip", "flac": "flac", "ffmpeg": "ffmpeg", "rsgain": "rsgain"},
+    "tools": {"cyanrip": "cyanrip", "flac": "flac", "ffmpeg": "ffmpeg", "rsgain": "rsgain"},  # ffmpeg: animated covers
     "rip": {
         "drive": "",            # "" = any drive holding an audio CD
         "drive_offset": "",     # read offset in samples, e.g. 6 (same number EAC uses)
@@ -44,7 +44,18 @@ DEFAULTS: dict = {
         "sources": ["local", "itunes"],                      # largest image from these wins
         "fallback_sources": ["coverartarchive", "deezer"],   # only if none of the above has one
         "max_aspect": 1.15,     # up to this far from square is centre-cropped; beyond it, skipped
+        # Apple Music's animated cover, saved as an animated cover.webp next to cover.jpg
+        "animated": True,
+        "animated_max_size": 1000,  # px; animated WebP files grow fast with size
+        "animated_quality": 75,     # WebP quality 0-100
+        "animated_fps": 0,          # 0 = keep the source frame rate
+        # Name of the still cover when an animated cover.webp exists: one that Jellyfin and Navidrome do
+        # not treat as album art, so they show the animation (they pick only one image per album).
+        # It is also the image the embedded 600 px art is made from.
+        "animated_still_name": "cover-static.jpg",
         "itunes_country": "US",
+        "itunes_interval": 3.0,     # seconds between iTunes searches (Apple allows ~20 a minute)
+        "apple_music_interval": 1.0,  # seconds between Apple Music lookups for animated covers
         "min_size": 600,        # the largest image found wins, but it must be at least this
         "max_size": 3000,       # larger images are scaled down to this
         "jpeg_quality": 88,

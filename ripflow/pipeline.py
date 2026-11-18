@@ -11,14 +11,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from . import albumstate
 from .config import attention, log
-from .cover import find_cover
+from .animated import Unavailable as AnimatedUnavailable, animated_cover
+from .cover import apple_album_id, find_cover, migrate_legacy_names, park_static_webp, settle_still
 from .dr import measure_album, write_log as write_dr_log
 from .discid import Toc, toc_from_param, toc_from_samples
 from .flacfile import FlacError, FlacInfo, read_info, write_tags
 from .musicbrainz import Album, MusicBrainz, identify
 from .ripper import RipResult
-from .util import ascii_punctuation, lead_int, natural_key, safe_component, safe_field
+from .util import NetworkError, NotFound, ascii_punctuation, lead_int, natural_key, safe_component, safe_field
 from .verify import check_many, pick_decoder
 
 
@@ -262,20 +264,53 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
         return _finish(cfg, out, dry_run)
 
     # 4. cover art -------------------------------------------------------------
-    cover = None
+    cover = animated = None
+    # album memory (ripflow.json): the destination's own, or the source's when it has none yet
+    memory = albumstate.load(dest_dir) or albumstate.load(src_dir)
+    learned: dict = {}
     if cfg["cover"]["enabled"] and not no_cover and (not unknown or only_local_art):
+        found: dict = {}
+        renamed = migrate_legacy_names(dest_dir, cfg) if dest_dir.is_dir() else []
+        parked = park_static_webp(dest_dir, cfg) if dest_dir.is_dir() else None
         cover, notes = find_cover(cfg, artist=artist, album=title, various=various, ntracks=len(items),
                                   mbid=album.mbid if album else "", group_id=album.group_id if album else "",
                                   local_dirs=[] if ignore_local_art else [dest_dir, src_dir],
                                   embedded_from=None if ignore_local_art else files[0],
-                                  only_local=only_local_art)
+                                  only_local=only_local_art, found=found)
         say("\n== Cover art ==")
+        for line in renamed + ([parked] if parked else []):
+            say(f"  {line}")
         for n in notes:
             say("  " + n)
         if cover is None:
             out.problems.append(f"no cover art of at least {cfg['cover']['min_size']}px found")
         else:
             say(f"  chosen: {cover.source} {cover.width}x{cover.height}")
+        # Apple Music's animated cover -> cover.webp (an existing one is kept unless --ignore-local-art)
+        existing = dest_dir / "cover.webp"
+        if cfg["cover"]["animated"] and not only_local_art and not unknown:
+            if existing.exists() and not ignore_local_art:
+                say("  animated cover: keeping the existing cover.webp")
+            else:
+                storefront = cfg["cover"]["itunes_country"].lower()
+                stored = memory.get("apple") or {}
+                known = stored.get("album_id") if stored.get("storefront") == storefront and not ignore_local_art else None
+                apple_id = found.get("apple_album_id") or known or apple_album_id(
+                    cfg, artist=artist, album=title, various=various, ntracks=len(items))
+                result = None
+                if not apple_id:
+                    result = "album not found on Apple Music"
+                    say(f"  animated cover: {result}")
+                else:
+                    learned["apple"] = {"album_id": apple_id, "storefront": storefront}
+                    try:
+                        animated = animated_cover(cfg, apple_id)
+                        result = "created" if animated else "no animated cover on Apple Music"
+                        say(f"  {animated.note}" if animated else f"  animated cover: {result}")
+                    except (AnimatedUnavailable, NetworkError, NotFound, OSError, subprocess.SubprocessError) as e:
+                        say(f"  animated cover: not available ({e})")
+                if result:
+                    learned["animated_cover"] = {"result": result, "checked": albumstate.today()}
 
     # 5. dynamic range (measured now, written with the other tags) --------------
     dr_rows = None
@@ -305,8 +340,10 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
             after = read_info(tgt)
             if (after.md5, after.total_samples) != (it.info.md5, it.info.total_samples):
                 out.problems.append(f"header changed unexpectedly after tagging: {tgt.name}")
+    if animated:
+        (dest_dir / "cover.webp").write_bytes(animated.webp)
     if cover:
-        (dest_dir / "cover.jpg").write_bytes(cover.jpeg)
+        say(f"  still cover {settle_still(dest_dir, cfg, cover.jpeg)}")
     if dr_rows and cfg["dr"]["write_log"]:
         write_dr_log(dest_dir / ("dr.txt" if disc_total == 1 else f"dr-disc{disc}.txt"),
                      artist, title, album_dr, dr_rows)
@@ -337,6 +374,11 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
         (dest_dir / "discid.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     elif (src_dir / "discid.txt").is_file() and move and not _same(src_dir, dest_dir):
         (src_dir / "discid.txt").unlink()
+    # album memory: whatever the source folder knew, plus what was learned now
+    if memory or learned:
+        albumstate.save(dest_dir, {**memory, **learned})
+        if move and not _same(src_dir, dest_dir) and (src_dir / albumstate.FILE).is_file():
+            (src_dir / albumstate.FILE).unlink()
     if move and not rip and not _same(src_dir, dest_dir):
         for extra in src_dir.glob("rip*.log"):          # carry earlier rip logs along
             if not (dest_dir / extra.name).exists():
