@@ -4,6 +4,7 @@ Used directly by `ripflow process <folder>` and by the disc watcher after each r
 """
 from __future__ import annotations
 
+import fnmatch
 import os
 import shutil
 import subprocess
@@ -91,6 +92,35 @@ def _read_discid_txt(folder: Path) -> tuple[str | None, Toc | None]:
     kv = dict(l.split("=", 1) for l in f.read_text(encoding="utf-8", errors="replace").splitlines()
               if "=" in l and not l.startswith(("#", "http")))
     return kv.get("discid", "").strip() or None, toc_from_param(kv.get("toc", ""))
+
+
+# Files ripflow makes itself. Brought along they would describe the old files, so they never
+# are (rip logs of a ripped album are moved separately, see below).
+GENERATED = ["discid.txt", albumstate.FILE, "dr.txt", "dr-disc*.txt", "rip.log", "rip-disc*.log", "*.ripflow-tmp"]
+GENERATED_COVERS = ["cover.jpg", "cover.webp", "cover orig.jpg", "cover orig.webp"]
+
+
+def plan_extras(cfg: dict, src_dir: Path, dest_dir: Path, renames: dict[str, str],
+                covers_managed: bool = True) -> list[tuple[Path, Path]]:
+    """(source, destination) for the extra files to bring along. `renames` maps a source
+    track's stem to its new stem, so "01. Song.lrc" follows "01. Song.flac". Cover files are
+    left behind only when ripflow makes the covers this run (not with --no-cover)."""
+    patterns = [p.lower() for p in cfg["files"]["extras"]]
+    still = cfg["cover"]["animated_still_name"]
+    skip = [g.lower() for g in GENERATED + ((GENERATED_COVERS + [still, Path(still).stem + ".webp"])
+                                            if covers_managed else [])]
+    lower = {k.lower(): v for k, v in renames.items()}
+    plan = []
+    for f in sorted(src_dir.iterdir(), key=lambda p: natural_key(p.name)):
+        name = f.name.lower()
+        if not f.is_file() or any(fnmatch.fnmatchcase(name, g) for g in skip) or \
+                not any(fnmatch.fnmatchcase(name, p) for p in patterns):
+            continue
+        stem = lower.get(f.stem.lower())
+        target = dest_dir / ((stem + f.suffix) if stem else f.name)
+        if not _same(f, target):
+            plan.append((f, target))
+    return plan
 
 
 def _same(a: Path, b: Path) -> bool:
@@ -250,6 +280,11 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
     say(f"\n== Destination ==\n  {dest_dir}")
     for it, tgt in zip(items, targets):
         say(f"  {it.src.name}  ->  {tgt.name}")
+    covers_managed = cfg["cover"]["enabled"] and not no_cover
+    extras = [] if rip else plan_extras(cfg, src_dir, dest_dir, {it.src.stem: t.stem for it, t in zip(items, targets)},
+                                        covers_managed)
+    for f, t in extras:
+        say(f"  extra: {f.name}" + (f"  ->  {t.name}" if t.name != f.name else ""))
 
     conflicts = [t for it, t in zip(items, targets) if t.exists() and not _same(it.src, t)]
     if len(set(targets)) != len(targets):
@@ -331,9 +366,16 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
 
     # 6. file + tag ------------------------------------------------------------
     dest_dir.mkdir(parents=True, exist_ok=True)
+    # Within the album's own folder a new name is a rename; copying would leave the old file beside it.
+    relocate = shutil.move if move or _same(src_dir, dest_dir) else shutil.copy2
+    for f, t in extras:
+        if t.exists():
+            say(f"  extra not copied, {t.name} already exists in the destination")
+            continue
+        relocate(str(f), str(t))
     for it, tgt in zip(items, targets):
         if not _same(it.src, tgt):
-            (shutil.move if move else shutil.copy2)(str(it.src), str(tgt))
+            relocate(str(it.src), str(tgt))
         if it.tags is not None or cover:
             write_tags(tgt, it.tags if it.tags is not None else it.info.tags,
                        picture=cover.embed if cover else None)

@@ -72,6 +72,13 @@ DEFAULTS: dict = {
         "keep": ["ALBUM DYNAMIC RANGE", "DYNAMIC RANGE", "ISRC", "LYRICS", "UNSYNCEDLYRICS",
                  "MUSICBRAINZ_DISCID", "UPC"],
     },
+    "files": {
+        # Other files that `process` brings along from the source folder (like Picard's
+        # "move additional files"). Lyric files named after a track are renamed with it.
+        # Files ripflow makes itself (cover.jpg, cover.webp, cover-static.*, dr.txt, rip.log,
+        # discid.txt, ripflow.json) are never brought along: they would describe the old files.
+        "extras": ["*.jpg", "*.png", "*.cue", "*.nfo", "*.pdf", "*.lrc", "*.webp"],
+    },
     "dr": {"enabled": True, "write_tags": True, "write_log": True},     # dynamic range (DR14)
     "rsgain": {"enabled": True, "args": ["easy", "--output", "{album}"]},
     "naming": {

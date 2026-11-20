@@ -61,6 +61,12 @@ library = 'D:\Music'             # finished albums land here: <library>/<artist>
 # A trailing * matches a prefix (e.g. "REPLAYGAIN_*").
 # keep = ["ALBUM DYNAMIC RANGE", "DYNAMIC RANGE", "ISRC", "LYRICS", "UNSYNCEDLYRICS", "MUSICBRAINZ_DISCID", "UPC"]
 
+[files]
+# Other files `process` brings along from the source folder; one named after a track (e.g. its
+# .lrc lyrics) is renamed with the track. Files ripflow makes itself (cover.jpg, cover.webp,
+# cover-static.*, dr.txt, rip.log, discid.txt, ripflow.json) are never brought along.
+# extras = ["*.jpg", "*.png", "*.cue", "*.nfo", "*.pdf", "*.lrc", "*.webp"]
+
 [dr]
 # enabled = true                   # measure dynamic range (needs numpy)
 # write_tags = true                # DYNAMIC RANGE / ALBUM DYNAMIC RANGE

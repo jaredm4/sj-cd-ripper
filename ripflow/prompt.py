@@ -14,7 +14,9 @@ def _describe(n: int, c: Candidate, recommended: bool) -> list[str]:
     label = ", ".join(dict.fromkeys(name for i in infos if (name := (i.get("label") or {}).get("name"))))
     catno = ", ".join(dict.fromkeys(x for i in infos if (x := i.get("catalog-number"))))
     title = rel.get("title", "") + (f" ({rel['disambiguation']})" if rel.get("disambiguation") else "")
-    facts = [rel.get("country") or "no country", rel.get("date") or "no date", c.medium.get("format") or "?"]
+    regions = len(rel.get("release-events") or [])
+    facts = [(c.country or "no country") + (f" (+{regions - 1} more regions)" if regions > 1 else ""),
+             rel.get("date") or "no date", c.medium.get("format") or "?"]
     facts += [x for x in (label, catno and f"cat. {catno}",
                           rel.get("barcode") and f"barcode {rel['barcode']}") if x]
     if c.key[0] == 0:

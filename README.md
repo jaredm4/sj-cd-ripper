@@ -33,7 +33,7 @@ Run from the folder that contains `ripflow.toml`:
 | `python -m ripflow watch` | Waits for audio CDs. Rips, processes, ejects, waits for the next one. |
 | `python -m ripflow rip` | Same, once, for the disc that is in the drive now. |
 | `python -m ripflow process <folder> --dry-run` | Shows the MusicBrainz candidates, the pick, and the planned file names. Changes nothing. |
-| `python -m ripflow process <folder> [--move]` | Runs the pipeline on existing FLACs. Copies into the library unless `--move`. |
+| `python -m ripflow process <folder> [--move]` | Runs the pipeline on existing FLACs. Copies into the library unless `--move`; an album already in its library folder is renamed in place. |
 | `python -m ripflow process <folder> --release <mbid>` | Overrides the automatic release choice. |
 | `python -m ripflow process <folder> --ignore-local-art` | Ignores existing `cover.jpg` / embedded art and searches online again. |
 | `python -m ripflow process <folder> --only-local-art` | Uses only a `cover`/`folder`/`front` `.jpg`/`.png`/`.webp` in the album folder (newest file wins). No online lookup; embedded art is ignored and replaced with a fresh 600 px copy. |
@@ -106,6 +106,17 @@ Defaults mirror the Picard naming preset:
 has more than one disc. As in Picard, each of `* : < > ? | "` becomes `_`, and a leading
 period becomes `_` (`_..And Justice for All`). Trailing periods stay on file names; on a
 folder name a trailing period also becomes `_` (`P.O.D_`), because Windows cannot store it.
+
+## Other files in the album folder
+
+`process` also brings along the album's other files from the source folder (`[files] extras`,
+by default `*.jpg *.png *.cue *.nfo *.pdf *.lrc *.webp`). A file named after a track, such as
+its `.lrc` lyrics, is renamed along with the track so players still find it. Files ripflow makes
+itself are never brought along, since they would describe the old files: `cover.jpg`,
+`cover.webp`, `cover-static.*`, `dr.txt`, `rip.log`, `discid.txt` and `ripflow.json` (with
+`--no-cover`, ripflow makes no cover, so the cover files do come along). A name that already
+exists in the library folder is not overwritten. `.cue` files are copied as they are, so the
+track names inside them refer to the old file names.
 
 ## Tags
 

@@ -131,12 +131,31 @@ def _digits(code: str) -> str:
     return "".join(c for c in code or "" if c.isdigit()).lstrip("0")
 
 
+def release_countries(rel: dict) -> list[str]:
+    """Every region a release came out in: its release events, in order, plus `country`."""
+    codes = [rel.get("country") or ""]
+    for event in rel.get("release-events") or []:
+        codes += (event.get("area") or {}).get("iso-3166-1-codes") or []
+    return list(dict.fromkeys(c.upper() for c in codes if c))
+
+
+def release_country(rel: dict, prefs: dict) -> str:
+    """The region to use for a release with several: the first of prefer_countries that it has
+    (US, then XW, then XE by default), else the first not in avoid_countries, else the first."""
+    codes = release_countries(rel)
+    avoid = {c.upper() for c in prefs.get("avoid_countries", [])}
+    for c in (x.upper() for x in prefs.get("prefer_countries", [])):
+        if c in codes:
+            return c
+    return next((c for c in codes if c not in avoid), codes[0] if codes else "")
+
+
 def _completeness(rel: dict, medium: dict) -> int:
     """How much metadata a release carries - the tie-breaker between otherwise equal releases."""
     info = (rel.get("label-info") or [{}])[0]
     tracks = medium.get("tracks") or []
     return sum(map(bool, [
-        rel.get("barcode"), rel.get("country"), rel.get("date"), len(rel.get("date") or "") >= 10,
+        rel.get("barcode"), release_countries(rel), rel.get("date"), len(rel.get("date") or "") >= 10,
         (info.get("label") or {}).get("name"), info.get("catalog-number"), rel.get("packaging"),
         rel.get("asin"), (rel.get("text-representation") or {}).get("language"),
         (rel.get("cover-art-archive") or {}).get("front"), medium.get("format"),
@@ -176,6 +195,7 @@ class Candidate:
     worst: float          # largest track-length difference, seconds
     meta: int             # metadata completeness score
     isrc_hits: int
+    country: str = ""     # the region chosen for this release (see release_country)
 
 
 def rank(releases: list[dict], *, ntracks: int, discid: str | None, durations: list[float],
@@ -206,7 +226,7 @@ def rank(releases: list[dict], *, ntracks: int, discid: str | None, durations: l
                                      prefs["max_track_diff_seconds"], trust_length=exact)
         if medium is None:
             continue
-        country = (rel.get("country") or "").upper()
+        country = release_country(rel, prefs)
         full = _completeness(rel, medium)
         hits = sum(1 for t, code in zip(medium.get("tracks") or [], isrcs)
                    if code and code in (t.get("recording") or {}).get("isrcs", []))
@@ -225,7 +245,7 @@ def rank(releases: list[dict], *, ntracks: int, discid: str | None, durations: l
                -full,
                rel.get("date") or "9999",
                rel["id"])
-        ranked.append(Candidate(key, rel, medium, worst, full, hits))
+        ranked.append(Candidate(key, rel, medium, worst, full, hits, country))
     ranked.sort(key=lambda c: c.key)
     return ranked
 
@@ -247,7 +267,7 @@ def report_lines(ranked: list[Candidate], *, total: int, ntracks: int, chosen: s
     lines = []
     for c in ranked:
         rel = c.release
-        lines.append(f"{'->' if rel['id'] == chosen else '  '} {rel.get('country') or '??':3} {rel.get('date') or '?':10} "
+        lines.append(f"{'->' if rel['id'] == chosen else '  '} {c.country or '??':3} {rel.get('date') or '?':10} "
                      f"{c.medium.get('format') or '?':14} {rel.get('status') or '?':9} "
                      f"barcode={rel.get('barcode') or '-':14}{'*' if c.key[0] == 0 else ' '} "
                      f"isrc={c.isrc_hits:2} meta={c.meta:2} maxdiff={c.worst:4.1f}s  {rel['id']}  {rel.get('title', '')}"
@@ -269,7 +289,7 @@ def _credit(ac: list[dict]) -> tuple[str, list[str], list[str]]:
     return text, [c["artist"]["name"] for c in ac], [c["artist"]["id"] for c in ac]
 
 
-def build_album(rel: dict, medium: dict) -> Album:
+def build_album(rel: dict, medium: dict, prefs: dict | None = None) -> Album:
     artist, artist_names, artist_ids = _credit(rel.get("artist-credit", []))
     rg = rel.get("release-group") or {}
     infos = rel.get("label-info") or []
@@ -288,7 +308,8 @@ def build_album(rel: dict, medium: dict) -> Album:
     return Album(
         mbid=rel["id"], group_id=rg.get("id", ""), title=rel.get("title", ""), artist=artist,
         artist_sort=sort, artist_ids=artist_ids, artists=artist_names, date=rel.get("date") or "",
-        original_date=rg.get("first-release-date") or "", country=rel.get("country") or "",
+        original_date=rg.get("first-release-date") or "",
+        country=release_country(rel, prefs or {}) or rel.get("country") or "",
         status=(rel.get("status") or "").lower(), release_type="; ".join(t.lower() for t in types if t),
         barcode=rel.get("barcode") or "", labels=labels, catalogs=catalogs, asin=rel.get("asin") or "",
         script=(rel.get("text-representation") or {}).get("script") or "", media=medium.get("format") or "",
@@ -354,7 +375,7 @@ def identify(mb: MusicBrainz, cfg: dict, infos: list[FlacInfo], *, discid: str |
                                               ntracks=ntracks, chosen=found[0]["id"])
             else:
                 out.notes.append("you confirmed the recommended release")
-        out.album, out.method = build_album(*found), method
+        out.album, out.method = build_album(*found, prefs), method
         if cfg["tags"]["ascii_punctuation"]:
             ascii_punctuation(out.album)
         try:
