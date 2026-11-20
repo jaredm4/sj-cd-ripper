@@ -150,8 +150,13 @@ any failure is noted in the report and the rest of the album is processed as nor
 - File size limit: `animated_max_mb` (default 19; 0 = none). A cover over it is encoded again,
   one step at a time and keeping each earlier step: a lower frame rate (24, 15, then 12 fps),
   then lower quality (15 less each time, down to 30), then a smaller size (700, then 600 px),
-  then round again, until it fits. Each try is a full encode, so a large cover can take a few
-  minutes. The report says what was reduced. Covers under the limit are left as they are.
+  then round again, until it fits. The report says what was reduced.
+- Speed: the WebP encoder uses one CPU core per encode. The cover is first encoded once with your
+  settings (most fit); if it is too big, the smaller settings are encoded side by side,
+  `animated_jobs` at a time (default: one fewer than your CPU cores, ~150 MB of memory each), and
+  the first one in the order above that fits is kept - so it takes about two encodes' time, not
+  nine. `animated_compression_level` (0-6, default 4) trades speed for size: 2 takes about half
+  the time for files about 10% bigger. Covers under the limit are left as they are.
   The default sits just under Navidrome's limit: it will not read an image over 20 MB and shows
   its placeholder instead. Lower it if phones are slow to show animated covers.
 - An existing `cover.webp` is kept, unless it is over the size limit (then it is made again, by

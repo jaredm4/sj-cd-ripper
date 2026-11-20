@@ -54,6 +54,12 @@ DEFAULTS: dict = {
         # 20 MB (it shows its placeholder), so the default only touches covers it would refuse. An
         # existing animated cover.webp over the limit is made again (process and covers).
         "animated_max_mb": 19,
+        # Covers over the limit are encoded again with several settings side by side, this many at
+        # once (each uses one CPU core and ~150 MB). 0 = one fewer than the number of cores.
+        "animated_jobs": 0,
+        # libwebp's effort, 0-6: lower is faster but makes bigger files (2 takes about half the
+        # time of 4, for files ~10% bigger). 4 is ffmpeg's default.
+        "animated_compression_level": 4,
         # Name of the still cover when an animated cover.webp exists: one that Jellyfin and Navidrome do
         # not treat as album art, so they show the animation (they pick only one image per album).
         # It is also the image the embedded 600 px art is made from.

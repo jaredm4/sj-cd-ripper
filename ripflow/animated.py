@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -152,18 +153,85 @@ def webp_encoder(ffmpeg: str) -> str | None:
     return next((e for e in ("libwebp_anim", "libwebp") if re.search(rf"\s{e}\s", out)), None)
 
 
-def to_webp(ffmpeg: str, encoder: str, video: bytes, max_size: int, quality: int, fps: int) -> bytes:
+def _encode_cmd(ffmpeg: str, encoder: str, src: Path, dst: Path, size: int, quality: int, fps: int,
+                level: int) -> list[str]:
+    vf = f"scale='min(iw,{size})':-1:flags=lanczos" + (f",fps={fps}" if fps else "")
+    return [ffmpeg, "-nostdin", "-hide_banner", "-v", "error", "-y", "-i", str(src), "-an", "-vf", vf,
+            "-c:v", encoder, "-loop", "0", "-q:v", str(quality), "-compression_level", str(level), str(dst)]
+
+
+def _source_file(tmp: str, video: bytes) -> Path:
+    src = Path(tmp) / ("in.ts" if video[:1] == b"\x47" else "in.mp4")
+    src.write_bytes(video)
+    return src
+
+
+def to_webp(ffmpeg: str, encoder: str, video: bytes, max_size: int, quality: int, fps: int,
+            level: int = 4) -> bytes:
     with tempfile.TemporaryDirectory() as tmp:
-        src = Path(tmp) / ("in.ts" if video[:1] == b"\x47" else "in.mp4")
-        dst = Path(tmp) / "out.webp"
-        src.write_bytes(video)
-        vf = f"scale='min(iw,{max_size})':-1:flags=lanczos" + (f",fps={fps}" if fps else "")
-        r = subprocess.run([ffmpeg, "-nostdin", "-hide_banner", "-v", "error", "-y", "-i", str(src), "-an",
-                            "-vf", vf, "-c:v", encoder, "-loop", "0", "-q:v", str(quality), str(dst)],
+        src, dst = _source_file(tmp, video), Path(tmp) / "out.webp"
+        r = subprocess.run(_encode_cmd(ffmpeg, encoder, src, dst, max_size, quality, fps, level),
                            capture_output=True, text=True, errors="replace", timeout=900)
         if r.returncode != 0 or not dst.is_file():
             raise Unavailable(f"ffmpeg could not convert the stream: {(r.stderr or '').strip()[-300:]}")
         return dst.read_bytes()
+
+
+def encode_jobs(setting: int) -> int:
+    """How many encodes may run at once: the setting, or with 0 one fewer than the CPU cores."""
+    return max(1, int(setting) if setting else (os.cpu_count() or 2) - 1)
+
+
+def _encode_parallel(ffmpeg: str, encoder: str, video: bytes, steps: list[tuple[int, int, int]], level: int,
+                     max_bytes: int, jobs: int) -> list[tuple[bytes, tuple[int, int, int]] | None]:
+    """Encode the steps up to `jobs` at a time (libwebp uses one core per encode). Stops as soon
+    as the earliest step that fits is known: every step before it finished and was too big.
+    Results in step order; None for steps not run or stopped."""
+    results: list = [None] * len(steps)
+    done = [False] * len(steps)
+    running: dict[int, subprocess.Popen] = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        src = _source_file(tmp, video)
+        out = lambda i: Path(tmp) / f"out{i}.webp"
+        nxt = 0
+
+        def settled() -> bool:      # the earliest fitting step is known
+            for i in range(len(steps)):
+                if not done[i]:
+                    return False
+                if results[i] and len(results[i][0]) <= max_bytes:
+                    return True
+            return True             # all done, none fits
+        try:
+            while not settled():
+                while nxt < len(steps) and len(running) < jobs:
+                    running[nxt] = subprocess.Popen(
+                        _encode_cmd(ffmpeg, encoder, src, out(nxt), *steps[nxt], level),
+                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+                    nxt += 1
+                time.sleep(0.2)
+                for i, proc in list(running.items()):
+                    if proc.poll() is None:
+                        continue
+                    err = proc.stderr.read().decode("utf-8", "replace") if proc.stderr else ""
+                    del running[i]
+                    done[i] = True
+                    if proc.returncode != 0 or not out(i).is_file():
+                        raise Unavailable(f"ffmpeg could not convert the stream: {err.strip()[-300:]}")
+                    results[i] = (out(i).read_bytes(), steps[i])
+                    if len(results[i][0]) > max_bytes:
+                        log.info("animated cover: try %d of %d (%s) is %.1f MB, over the limit",
+                                 i + 1, len(steps), _describe(steps[i]), len(results[i][0]) / 1e6)
+        finally:
+            for proc in running.values():          # no longer needed, or something failed
+                proc.kill()
+                proc.wait()
+    return results
+
+
+def _describe(step: tuple[int, int, int]) -> str:
+    size, q, f = step
+    return f"{size}px, quality {q}, " + (f"{f} fps" if f else "source fps")
 
 
 FPS_STEPS = (24, 15, 12)        # frames per second to step down through
@@ -194,21 +262,23 @@ def shrink_steps(max_size: int, quality: int, fps: int) -> list[tuple[int, int, 
 
 
 def to_webp_within(ffmpeg: str, encoder: str, video: bytes, max_size: int, quality: int, fps: int,
-                   max_bytes: int) -> tuple[bytes, str]:
-    """The WebP and a note on what had to give to fit max_bytes (0 = no limit). If nothing fits,
-    the smallest attempt is kept and the note says so."""
-    best = None
-    for n, (size, q, f) in enumerate(shrink_steps(max_size, quality, fps) if max_bytes else [(max_size, quality, fps)]):
-        webp = to_webp(ffmpeg, encoder, video, size, q, f)
-        if best is None or len(webp) < len(best[0]):
-            best = (webp, size, q, f)
-        if not max_bytes or len(webp) <= max_bytes:
-            break
-        log.info("animated cover: %.1f MB is over the %.1f MB limit, encoding again smaller",
-                 len(webp) / 1e6, max_bytes / 1e6)
-    webp, size, q, f = best
+                   max_bytes: int, level: int = 4, jobs: int = 1) -> tuple[bytes, str]:
+    """The WebP and a note on what had to give to fit max_bytes (0 = no limit). The configured
+    settings are tried first, on their own (most covers fit); if that is too big, the smaller
+    settings (shrink_steps) are encoded side by side, `jobs` at a time, and the first in order
+    that fits is kept. If nothing fits, the smallest attempt is kept and the note says so."""
+    first = to_webp(ffmpeg, encoder, video, max_size, quality, fps, level)
+    if not max_bytes or len(first) <= max_bytes:
+        return first, ""
+    steps = shrink_steps(max_size, quality, fps)[1:]
+    log.info("animated cover: %.1f MB is over the %.3g MB limit; trying %d smaller settings, %d at a time",
+             len(first) / 1e6, max_bytes / 1e6, len(steps), min(jobs, len(steps)))
+    tried = [r for r in _encode_parallel(ffmpeg, encoder, video, steps, level, max_bytes, jobs) if r]
+    fitting = [r for r in tried if len(r[0]) <= max_bytes]
+    webp, (size, q, f) = fitting[0] if fitting else min(tried + [(first, (max_size, quality, fps))],
+                                                         key=lambda r: len(r[0]))
     if (size, q, f) == (max_size, quality, fps):
-        return webp, ""
+        return webp, f"; still over the {max_bytes / 1e6:.3g} MB limit"
     how = ", ".join(x for x in ((f"{f} fps" if f != fps else ""), (f"quality {q}" if q != quality else ""),
                                 (f"at most {size}px" if size != max_size else "")) if x)
     fits = "to fit" if len(webp) <= max_bytes else "but still over"
@@ -233,7 +303,8 @@ def animated_cover(cfg: dict, album_id: str) -> Animated | None:
     media_url, w, h = pick_variant(master, master_url, c["animated_max_size"])
     video = download_stream(media_url, BROWSER_UA)
     webp, shrunk = to_webp_within(ffmpeg, encoder, video, c["animated_max_size"], c["animated_quality"],
-                                  c["animated_fps"], int(float(c["animated_max_mb"] or 0) * 1e6))
+                                  c["animated_fps"], int(float(c["animated_max_mb"] or 0) * 1e6),
+                                  int(c["animated_compression_level"]), encode_jobs(c["animated_jobs"]))
     from PIL import Image
     with Image.open(io.BytesIO(webp)) as im:
         width, height, frames = im.width, im.height, getattr(im, "n_frames", 1)
