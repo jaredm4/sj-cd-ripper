@@ -48,6 +48,8 @@ Run from the folder that contains `ripflow.toml`:
 - One beep = clean, three low beeps = an entry was added to `logs/ATTENTION.log`.
 - `logs/ATTENTION.log` has one line per problem; `logs/reports/` has a full report per album
   (integrity, AccurateRip per track, every MusicBrainz candidate and which one won, cover source).
+  The same report is saved in the album folder as `ripflow-report.log` (`ripflow-report-disc2.log`
+  and so on for multi-disc sets), replaced on each run; `logs/reports/` keeps every run.
 - If the tray closes itself on the same disc, it is recognised and not ripped again.
 
 ## What gets checked
@@ -145,7 +147,15 @@ any failure is noted in the report and the rest of the album is processed as nor
 
 - Size: `animated_max_size` (default 1000 px), `animated_quality` (75), `animated_fps` (0 =
   source). Animated WebP files grow quickly; the report shows each file's size.
-- An existing `cover.webp` is kept; `--ignore-local-art` makes a new one.
+- File size limit: `animated_max_mb` (default 19; 0 = none). A cover over it is encoded again,
+  one step at a time and keeping each earlier step: a lower frame rate (24, 15, then 12 fps),
+  then lower quality (15 less each time, down to 30), then a smaller size (700, then 600 px),
+  then round again, until it fits. Each try is a full encode, so a large cover can take a few
+  minutes. The report says what was reduced. Covers under the limit are left as they are.
+  The default sits just under Navidrome's limit: it will not read an image over 20 MB and shows
+  its placeholder instead. Lower it if phones are slow to show animated covers.
+- An existing `cover.webp` is kept, unless it is over the size limit (then it is made again, by
+  `process` and by `covers`); `--ignore-local-art` makes a new one.
 - A still (not animated) `cover.webp` is renamed to `cover-static.webp`, so it no longer competes
   with `cover.jpg`; it remains available as a still-cover source.
 - Jellyfin and Navidrome show one album image, so the still cover can't sit beside the

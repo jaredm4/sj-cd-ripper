@@ -49,6 +49,11 @@ DEFAULTS: dict = {
         "animated_max_size": 1000,  # px; animated WebP files grow fast with size
         "animated_quality": 75,     # WebP quality 0-100
         "animated_fps": 0,          # 0 = keep the source frame rate
+        # Largest animated cover file in MB (0 = no limit). A bigger one is encoded again, one step
+        # at a time: fewer frames per second, then lower quality, then smaller, and round again. Navidrome will not read an image over
+        # 20 MB (it shows its placeholder), so the default only touches covers it would refuse. An
+        # existing animated cover.webp over the limit is made again (process and covers).
+        "animated_max_mb": 19,
         # Name of the still cover when an animated cover.webp exists: one that Jellyfin and Navidrome do
         # not treat as album art, so they show the animation (they pick only one image per album).
         # It is also the image the embedded 600 px art is made from.

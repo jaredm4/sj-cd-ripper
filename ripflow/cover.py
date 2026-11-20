@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import os
 import json
 import re
 import time
@@ -111,6 +112,23 @@ def is_animated(path: Path) -> bool:
             return bool(getattr(im, "is_animated", False))
     except Exception:
         return False
+
+
+def oversized_animation(path: Path, cfg: dict) -> float:
+    """Size in MB of an animated cover over the animated_max_mb limit, else 0."""
+    limit = float(cfg["cover"].get("animated_max_mb") or 0)
+    try:
+        mb = path.stat().st_size / 1e6
+    except OSError:
+        return 0.0
+    return mb if limit and mb > limit and is_animated(path) else 0.0
+
+
+def write_replacing(path: Path, data: bytes) -> None:
+    """Write a file so that nothing (a media server's folder watcher) ever sees it half-written."""
+    tmp = path.with_name(path.name + ".ripflow-tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
 
 
 LEGACY_STILL_STEMS = ("cover orig",)     # earlier name of the still beside an animated cover

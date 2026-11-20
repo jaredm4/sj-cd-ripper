@@ -46,6 +46,9 @@ library = 'D:\Music'             # finished albums land here: <library>/<artist>
 # animated_max_size = 1000         # px; animated WebP files grow quickly with size
 # animated_quality = 75            # WebP quality, 0-100
 # animated_fps = 0                 # 0 = keep the source frame rate
+# animated_max_mb = 19             # largest animated cover file; a bigger one is encoded again with fewer
+#                                  # fps, then lower quality, then smaller, step by step (0 = no limit). Navidrome won't
+#                                  # read images over 20 MB. An existing one over the limit is made again.
 # animated_still_name = "cover-static.jpg"   # still cover's name when an animated cover.webp exists (else cover.jpg)
 # max_aspect = 1.15                # up to this far from square is centre-cropped to a square; beyond it, skipped
 # min_size = 600                   # the largest image found wins, but it must be at least this

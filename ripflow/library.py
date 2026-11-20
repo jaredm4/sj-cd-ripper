@@ -27,7 +27,7 @@ from .animated import Unavailable, animated_cover, motion_stream
 from . import albumstate
 from .config import log
 from .cover import (LEGACY_STILL_STEMS, apple_album_id, find_cover, is_animated, migrate_legacy_names,
-                    park_static_webp, settle_still)
+                    oversized_animation, park_static_webp, settle_still, write_replacing)
 from .flacfile import FlacError, read_info
 from .util import NetworkError, natural_key
 
@@ -201,11 +201,12 @@ def _one_album(cfg: dict, folder: Path, root: Path, legacy: dict, *, dry_run: bo
         mem["still_cover"] = {"result": "found" if cover else NO_STILL, "checked": albumstate.today()}
 
     # animated cover (with dry_run a still cover.webp is still there, but would be moved aside)
-    if is_animated(folder / "cover.webp"):
+    too_big = oversized_animation(folder / "cover.webp", cfg) if c["animated"] else 0
+    if is_animated(folder / "cover.webp") and not too_big:
         row["animated"] = "already there"
     elif not c["animated"]:
         row["animated"] = "off in config"
-    elif not recheck and seen_anim.get("result") in NO_ANIMATION:
+    elif not too_big and not recheck and seen_anim.get("result") in NO_ANIMATION:
         row["animated"] = f"skipped ({seen_anim['result']} on {seen_anim.get('checked', '?')})"
     else:
         apple_id = found.get("apple_album_id") or known_id or apple_album_id(
@@ -213,20 +214,23 @@ def _one_album(cfg: dict, folder: Path, root: Path, legacy: dict, *, dry_run: bo
             barcode=info["barcode"])
         if apple_id:
             mem["apple"] = {"album_id": apple_id, "storefront": storefront}
+        was = f" (was {too_big:.1f} MB)" if too_big else ""
         if not apple_id:
-            row["animated"] = NO_ANIMATION[1]
+            row["animated"] = NO_ANIMATION[1] + (f"; kept the existing {too_big:.1f} MB one" if too_big else "")
         elif dry_run:
             url = motion_stream(c["itunes_country"].lower(), apple_id, c["apple_music_interval"])
-            row["animated"] = "would be created" if url else NO_ANIMATION[0]
+            row["animated"] = (("would be made smaller" + was) if too_big else "would be created") if url \
+                else NO_ANIMATION[0]
         else:
             anim = animated_cover(cfg, apple_id)
             if anim:
-                (folder / "cover.webp").write_bytes(anim.webp)
-                row["animated"] = f"created ({anim.width}x{anim.height}, {len(anim.webp) / 1e6:.1f} MB)"
+                write_replacing(folder / "cover.webp", anim.webp)
+                row["animated"] = (f"{'remade' if too_big else 'created'} ({anim.width}x{anim.height}, "
+                                   f"{len(anim.webp) / 1e6:.1f} MB{', was ' + format(too_big, '.1f') + ' MB' if too_big else ''})")
             else:
-                row["animated"] = NO_ANIMATION[0]
-        if not dry_run:
-            mem["animated_cover"] = {"result": "created" if row["animated"].startswith("created") else row["animated"],
+                row["animated"] = NO_ANIMATION[0] + (f"; kept the existing {too_big:.1f} MB one" if too_big else "")
+        if not dry_run and not (too_big and not row["animated"].startswith("remade")):
+            mem["animated_cover"] = {"result": "created" if row["animated"].startswith(("created", "remade")) else row["animated"],
                                      "checked": albumstate.today()}
 
     # still naming

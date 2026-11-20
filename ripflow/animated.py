@@ -166,6 +166,55 @@ def to_webp(ffmpeg: str, encoder: str, video: bytes, max_size: int, quality: int
         return dst.read_bytes()
 
 
+FPS_STEPS = (24, 15, 12)        # frames per second to step down through
+QUALITY_STEP, QUALITY_FLOOR = 15, 30
+SIZE_STEPS = (700, 600)         # px
+
+
+def shrink_steps(max_size: int, quality: int, fps: int) -> list[tuple[int, int, int]]:
+    """Encoder settings (size, quality, fps) to try in turn until the file fits the size limit.
+    Starting from the configured ones, it takes one step down in frame rate, then one in
+    quality, then one in size, and round again, each step keeping the earlier ones
+    (fps 24 -> 15 -> 12, quality -15 each time down to 30, size 700 -> 600 px). An axis with no
+    steps left is skipped."""
+    fps_left = [f for f in FPS_STEPS if not fps or f < fps]
+    q_left = list(range(quality - QUALITY_STEP, QUALITY_FLOOR - 1, -QUALITY_STEP))
+    if quality > QUALITY_FLOOR and (not q_left or q_left[-1] > QUALITY_FLOOR):
+        q_left.append(QUALITY_FLOOR)
+    size_left = [n for n in SIZE_STEPS if n < max_size]
+    size, q, f = max_size, quality, fps
+    steps = [(size, q, f)]
+    while fps_left or q_left or size_left:
+        for left, axis in ((fps_left, "f"), (q_left, "q"), (size_left, "s")):
+            if left:
+                v = left.pop(0)
+                size, q, f = (v, q, f) if axis == "s" else (size, v, f) if axis == "q" else (size, q, v)
+                steps.append((size, q, f))
+    return steps
+
+
+def to_webp_within(ffmpeg: str, encoder: str, video: bytes, max_size: int, quality: int, fps: int,
+                   max_bytes: int) -> tuple[bytes, str]:
+    """The WebP and a note on what had to give to fit max_bytes (0 = no limit). If nothing fits,
+    the smallest attempt is kept and the note says so."""
+    best = None
+    for n, (size, q, f) in enumerate(shrink_steps(max_size, quality, fps) if max_bytes else [(max_size, quality, fps)]):
+        webp = to_webp(ffmpeg, encoder, video, size, q, f)
+        if best is None or len(webp) < len(best[0]):
+            best = (webp, size, q, f)
+        if not max_bytes or len(webp) <= max_bytes:
+            break
+        log.info("animated cover: %.1f MB is over the %.1f MB limit, encoding again smaller",
+                 len(webp) / 1e6, max_bytes / 1e6)
+    webp, size, q, f = best
+    if (size, q, f) == (max_size, quality, fps):
+        return webp, ""
+    how = ", ".join(x for x in ((f"{f} fps" if f != fps else ""), (f"quality {q}" if q != quality else ""),
+                                (f"at most {size}px" if size != max_size else "")) if x)
+    fits = "to fit" if len(webp) <= max_bytes else "but still over"
+    return webp, f"; reduced {fits} the {max_bytes / 1e6:.3g} MB limit ({how})"
+
+
 def animated_cover(cfg: dict, album_id: str) -> Animated | None:
     """Animated square cover for an Apple Music album id; None if the album has none.
     Raises Unavailable (or NetworkError) when one may exist but could not be made."""
@@ -183,11 +232,12 @@ def animated_cover(cfg: dict, album_id: str) -> Animated | None:
     master = http_get(master_url, BROWSER_UA).decode("utf-8", "replace")
     media_url, w, h = pick_variant(master, master_url, c["animated_max_size"])
     video = download_stream(media_url, BROWSER_UA)
-    webp = to_webp(ffmpeg, encoder, video, c["animated_max_size"], c["animated_quality"], c["animated_fps"])
+    webp, shrunk = to_webp_within(ffmpeg, encoder, video, c["animated_max_size"], c["animated_quality"],
+                                  c["animated_fps"], int(float(c["animated_max_mb"] or 0) * 1e6))
     from PIL import Image
     with Image.open(io.BytesIO(webp)) as im:
         width, height, frames = im.width, im.height, getattr(im, "n_frames", 1)
     note = (f"Apple Music animated cover: {width}x{height}, {frames} frames, {len(webp) / 1e6:.1f} MB"
-            + (f" (from a {w}x{h} stream)" if w else ""))
+            + (f" (from a {w}x{h} stream)" if w else "") + shrunk)
     log.info("animated cover: %dx%d, %d frames, %.1f MB", width, height, frames, len(webp) / 1e6)
     return Animated(webp, width, height, frames, note)

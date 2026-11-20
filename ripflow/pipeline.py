@@ -16,7 +16,8 @@ from pathlib import Path
 from . import albumstate
 from .config import attention, log
 from .animated import Unavailable as AnimatedUnavailable, animated_cover
-from .cover import apple_album_id, find_cover, migrate_legacy_names, park_static_webp, settle_still
+from .cover import (apple_album_id, find_cover, migrate_legacy_names, oversized_animation, park_static_webp,
+                    settle_still, write_replacing)
 from .dr import measure_album, write_log as write_dr_log
 from .discid import Toc, toc_from_param, toc_from_samples
 from .flacfile import FlacError, FlacInfo, read_info, write_tags
@@ -34,6 +35,7 @@ class Outcome:
     label: str = ""
     problems: list[str] = field(default_factory=list)
     report: list[str] = field(default_factory=list)
+    album_report: Path | None = None     # copy of the report kept in the album folder
 
     @property
     def ok(self) -> bool:
@@ -97,7 +99,9 @@ def _read_discid_txt(folder: Path) -> tuple[str | None, Toc | None]:
 
 # Files ripflow makes itself. Brought along they would describe the old files, so they never
 # are (rip logs of a ripped album are moved separately, see below).
-GENERATED = ["discid.txt", albumstate.FILE, "dr.txt", "dr-disc*.txt", "rip.log", "rip-disc*.log", "*.ripflow-tmp"]
+REPORT = "ripflow-report.log"
+GENERATED = ["discid.txt", albumstate.FILE, "dr.txt", "dr-disc*.txt", "rip.log", "rip-disc*.log", "*.ripflow-tmp",
+             "ripflow-report*.log"]
 GENERATED_COVERS = ["cover.jpg", "cover.webp", "cover orig.jpg", "cover orig.webp"]
 
 
@@ -382,9 +386,13 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
         # Apple Music's animated cover -> cover.webp (an existing one is kept unless --ignore-local-art)
         existing = dest_dir / "cover.webp"
         if cfg["cover"]["animated"] and not only_local_art and not unknown:
-            if existing.exists() and not ignore_local_art:
+            too_big = oversized_animation(existing, cfg)
+            if existing.exists() and not ignore_local_art and not too_big:
                 say("  animated cover: keeping the existing cover.webp")
             else:
+                if too_big:
+                    say(f"  animated cover: the existing cover.webp is {too_big:.1f} MB, over the "
+                        f"{cfg['cover']['animated_max_mb']:g} MB limit - making it again")
                 storefront = cfg["cover"]["itunes_country"].lower()
                 stored = memory.get("apple") or {}
                 known = stored.get("album_id") if stored.get("storefront") == storefront and not ignore_local_art else None
@@ -399,7 +407,8 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
                     try:
                         animated = animated_cover(cfg, apple_id)
                         result = "created" if animated else "no animated cover on Apple Music"
-                        say(f"  {animated.note}" if animated else f"  animated cover: {result}")
+                        say(f"  {animated.note}" if animated else f"  animated cover: {result}"
+                            + (" (keeping the existing cover.webp)" if too_big else ""))
                     except (AnimatedUnavailable, NetworkError, NotFound, OSError, subprocess.SubprocessError) as e:
                         say(f"  animated cover: not available ({e})")
                 if result:
@@ -441,7 +450,7 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
             if (after.md5, after.total_samples) != (it.info.md5, it.info.total_samples):
                 out.problems.append(f"header changed unexpectedly after tagging: {tgt.name}")
     if animated:
-        (dest_dir / "cover.webp").write_bytes(animated.webp)
+        write_replacing(dest_dir / "cover.webp", animated.webp)
     if cover:
         say(f"  still cover {settle_still(dest_dir, cfg, cover.jpeg)}")
     if dr_rows and cfg["dr"]["write_log"]:
@@ -483,8 +492,12 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
         for extra in src_dir.glob("rip*.log"):          # carry earlier rip logs along
             if not (dest_dir / extra.name).exists():
                 shutil.move(str(extra), str(dest_dir / extra.name))
+    if move and not _same(src_dir, dest_dir):
+        for old in src_dir.glob("ripflow-report*.log"):  # it describes the files as they were
+            old.unlink()
     if move and not _same(src_dir, dest_dir) and src_dir.is_dir() and not any(src_dir.iterdir()):
         src_dir.rmdir()
+    out.album_report = dest_dir / (REPORT if disc_total == 1 else f"ripflow-report-disc{disc}.log")
     return _finish(cfg, out, dry_run)
 
 
@@ -499,6 +512,11 @@ def _finish(cfg: dict, out: Outcome, dry_run: bool) -> Outcome:
     reports.mkdir(parents=True, exist_ok=True)
     name = safe_component(f"{datetime.now():%Y-%m-%d %H.%M.%S} {out.label or out.source.name}", limit=150) + ".txt"
     (reports / name).write_text(text, encoding="utf-8")
+    if out.album_report and out.album_report.parent.is_dir():
+        try:                                   # the latest run's report, beside the files it describes
+            out.album_report.write_text(text, encoding="utf-8")
+        except OSError as e:
+            log.warning("could not write %s: %s", out.album_report, e)
     where = out.dest or out.source
     log.info("%s -> %s (%s)", out.label or out.source.name, where,
              "OK" if out.ok else f"{len(out.problems)} issue(s)")
