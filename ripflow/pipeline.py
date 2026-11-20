@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -21,7 +22,7 @@ from .discid import Toc, toc_from_param, toc_from_samples
 from .flacfile import FlacError, FlacInfo, read_info, write_tags
 from .musicbrainz import Album, MusicBrainz, identify
 from .ripper import RipResult
-from .util import NetworkError, NotFound, ascii_punctuation, lead_int, natural_key, safe_component, safe_field
+from .util import NetworkError, NotFound, ascii_punctuation, similar, lead_int, natural_key, safe_component, safe_field
 from .verify import check_many, pick_decoder
 
 
@@ -100,24 +101,77 @@ GENERATED = ["discid.txt", albumstate.FILE, "dr.txt", "dr-disc*.txt", "rip.log",
 GENERATED_COVERS = ["cover.jpg", "cover.webp", "cover orig.jpg", "cover orig.webp"]
 
 
-def plan_extras(cfg: dict, src_dir: Path, dest_dir: Path, renames: dict[str, str],
+PER_TRACK = {".lrc", ".elrc"}     # files that belong to one track and must keep its name
+_NUMBERED = re.compile(r"(?:^|\s-\s)(?:(\d{1,2})-)?(\d{1,3})(?:\.|\s|-|_)+\s*(.*)$")
+
+
+def match_track(stem: str, tracks: list[dict], disc: int = 1) -> dict | None:
+    """The track a per-track file (lyrics) belongs to. tracks: dicts with src (source stem),
+    new (new stem), track (number) and titles (source and new title).
+    1. same name as the track's source file
+    2. the track number in the name ("01. Title", "1-01 Title", "Artist - Album - 01 Title"),
+       but only if the title in the name also resembles that track's title
+    3. a near-identical title, when the name has no number"""
+    for t in tracks:
+        if t["src"].lower() == stem.lower():
+            return t
+    scored = [(fit, t) for t in tracks if (fit := match_fit(stem, t, tracks, disc)) is not None]
+    return max(scored, key=lambda x: x[0])[1] if scored else None
+
+
+def match_fit(stem: str, t: dict, tracks: list[dict], disc: int = 1) -> float | None:
+    """How well a per-track file name fits track t (higher is better), or None if it doesn't:
+    rule 2 or 3 of match_track. The fit is how closely the title in the name resembles the
+    track's, so of two lyric files for one track ("01. Title" and "01. Title - old copy") the
+    one whose title is closer wins."""
+    title = lambda text: max((similar(text, x) for x in t["titles"] if x), default=0)
+    m = _NUMBERED.search(stem)
+    if m:
+        d, n, text = int(m.group(1) or disc), int(m.group(2)), m.group(3).strip()
+        if d != disc or t["track"] != n or sum(x["track"] == n for x in tracks) != 1:
+            return None
+        if not text:
+            return 0.6
+        fit = title(text)
+        return fit if fit >= 0.6 else None
+    fit = title(stem)
+    return fit if fit >= 0.9 else None
+
+
+def plan_extras(cfg: dict, src_dir: Path, dest_dir: Path, tracks: list[dict], disc: int = 1,
                 covers_managed: bool = True) -> list[tuple[Path, Path]]:
-    """(source, destination) for the extra files to bring along. `renames` maps a source
-    track's stem to its new stem, so "01. Song.lrc" follows "01. Song.flac". Cover files are
-    left behind only when ripflow makes the covers this run (not with --no-cover)."""
+    """(source, destination) for the extra files to bring along. A file named exactly like a
+    source track follows that track's new name; a lyric file is matched to its track even if
+    the names differ (see match_track). Cover files are left behind only when ripflow makes
+    the covers this run (not with --no-cover)."""
     patterns = [p.lower() for p in cfg["files"]["extras"]]
     still = cfg["cover"]["animated_still_name"]
     skip = [g.lower() for g in GENERATED + ((GENERATED_COVERS + [still, Path(still).stem + ".webp"])
                                             if covers_managed else [])]
-    lower = {k.lower(): v for k, v in renames.items()}
+    files = [f for f in sorted(src_dir.iterdir(), key=lambda p: natural_key(p.name))
+             if f.is_file() and not any(fnmatch.fnmatchcase(f.name.lower(), g) for g in skip)
+             and any(fnmatch.fnmatchcase(f.name.lower(), p) for p in patterns)]
+    exact = lambda f: next((t for t in tracks if t["src"].lower() == f.stem.lower()), None)
+    chosen = {f: exact(f) for f in files}
+    # Per file, not per album: a lyric file still named like its track keeps that match, and
+    # only the others (e.g. left with an old name when the tracks were converted and renamed)
+    # are matched by number and title - among the tracks no lyric file matched exactly.
+    # The closest fits are settled first, so a stray copy can't take a track from its own
+    # lyric file just because its name sorts first.
+    claimed = {id(t) for f, t in chosen.items() if t and f.suffix.lower() in PER_TRACK}
+    pairs = sorted(((fit, i, f, t) for i, f in enumerate(files)
+                    if chosen[f] is None and f.suffix.lower() in PER_TRACK
+                    for t in tracks if id(t) not in claimed
+                    and (fit := match_fit(f.stem, t, tracks, disc)) is not None),
+                   key=lambda x: (-x[0], x[1]))
+    for fit, i, f, t in pairs:
+        if chosen[f] is None and id(t) not in claimed:
+            chosen[f] = t
+            claimed.add(id(t))
     plan = []
-    for f in sorted(src_dir.iterdir(), key=lambda p: natural_key(p.name)):
-        name = f.name.lower()
-        if not f.is_file() or any(fnmatch.fnmatchcase(name, g) for g in skip) or \
-                not any(fnmatch.fnmatchcase(name, p) for p in patterns):
-            continue
-        stem = lower.get(f.stem.lower())
-        target = dest_dir / ((stem + f.suffix) if stem else f.name)
+    for f in files:
+        t = chosen[f]
+        target = dest_dir / ((t["new"] + f.suffix) if t else f.name)
         if not _same(f, target):
             plan.append((f, target))
     return plan
@@ -281,8 +335,9 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
     for it, tgt in zip(items, targets):
         say(f"  {it.src.name}  ->  {tgt.name}")
     covers_managed = cfg["cover"]["enabled"] and not no_cover
-    extras = [] if rip else plan_extras(cfg, src_dir, dest_dir, {it.src.stem: t.stem for it, t in zip(items, targets)},
-                                        covers_managed)
+    track_list = [dict(src=it.src.stem, new=t.stem, track=it.track, titles=[it.info.tag("TITLE"), it.title])
+                  for it, t in zip(items, targets)]
+    extras = [] if rip else plan_extras(cfg, src_dir, dest_dir, track_list, disc, covers_managed)
     for f, t in extras:
         say(f"  extra: {f.name}" + (f"  ->  {t.name}" if t.name != f.name else ""))
 

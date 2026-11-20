@@ -111,7 +111,11 @@ folder name a trailing period also becomes `_` (`P.O.D_`), because Windows canno
 
 `process` also brings along the album's other files from the source folder (`[files] extras`,
 by default `*.jpg *.png *.cue *.nfo *.pdf *.lrc *.webp`). A file named after a track, such as
-its `.lrc` lyrics, is renamed along with the track so players still find it. Files ripflow makes
+its `.lrc` lyrics, is renamed along with the track so players still find it. A lyric file whose
+name no longer matches its track (say the tracks were converted and renamed by another tool) is
+matched by the track number in its name, if its title also resembles that track's, or else by
+a near-identical title; this is decided per file, so lyric files that still match keep their
+match. A lyric file that fits no track keeps its name. Files ripflow makes
 itself are never brought along, since they would describe the old files: `cover.jpg`,
 `cover.webp`, `cover-static.*`, `dr.txt`, `rip.log`, `discid.txt` and `ripflow.json` (with
 `--no-cover`, ripflow makes no cover, so the cover files do come along). A name that already
