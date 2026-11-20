@@ -203,6 +203,13 @@ first track, and Apple (iTunes search API, the Apple Music catalogue). The large
 them wins. Only when none of them has a usable image are the `fallback_sources` tried: Cover
 Art Archive (original-size front image, often a scan) and Deezer (1000 px).
 
+Stores list every edition of an album under nearly the same name, so the store album is chosen
+on signals that don't depend on naming, strongest first: its UPC equals the release's barcode
+(looked up directly), then the same track count, then the same edition text (whatever is in
+brackets or after " - " in the title, plus MusicBrainz's edition note), then how closely the
+names match. Only the best-matching album's image is used, never a bigger image from another
+edition; the report names the album used and the ones passed over.
+
 An image must be at least `min_size` (600) and is scaled down to `max_size` (3000). Images
 that are slightly off square are centre-cropped, never stretched; anything beyond
 `max_aspect` is skipped. Apple and Deezer results are only considered when artist and album

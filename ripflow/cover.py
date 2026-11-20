@@ -28,10 +28,62 @@ class Cover:
         return min(self.width, self.height)
 
 
+def _base_title(title: str) -> str:
+    """The title without its edition parts: bracketed text and anything after " - "."""
+    base = re.sub(r"\s[-\u2013\u2014]\s.*$", "", re.sub(r"\s*[\(\[][^\)\]]*[\)\]]", "", title or "")).strip()
+    return base or (title or "")
+
+
 def _matches(artist: str, album: str, got_artist: str, got_album: str, various: bool) -> float:
+    """Name match on the base titles; edition parts are weighed separately (see _rank)."""
     a = 1.0 if various or not artist else similar(artist, got_artist)
-    b = similar(album, got_album)
+    b = similar(_base_title(album), _base_title(got_album))
     return (a + b) / 2 if a >= 0.8 and b >= 0.85 else 0.0
+
+
+# Stores list every edition of an album under nearly the same name ("X", "X (Deluxe)",
+# "X (10th Anniversary Edition)", "X [Bonus Track Version]"), and MusicBrainz names editions
+# however the person who entered them chose to. So a candidate is ranked on signals that do
+# not depend on naming, strongest first:
+#   1. its UPC equals the release's barcode (looked up directly - the exact product)
+#   2. its track count equals ours
+#   3. its edition text equals ours: whatever stands in brackets or after " - " in the title,
+#      plus MusicBrainz's edition note, compared as a set of words (any name counts)
+#   4. how closely the names match
+#   5. explicit over clean (the cover is normally the same; the album id matters for animation)
+_GENERIC = {"edition", "version", "explicit", "clean", "cleaned", "album", "the", "a", "and", "of",
+            "original", "digital", "release"}
+_EXTRA = re.compile(r"[\(\[]([^\)\]]*)[\)\]]|\s[-\u2013\u2014]\s(.+)$")
+
+
+def edition_words(title: str, note: str = "") -> frozenset[str]:
+    """The words that set an edition apart: the bracketed / dashed parts of a title plus an
+    edition note, without generic words such as "edition", "version", "explicit"."""
+    parts = [m.group(1) or m.group(2) or "" for m in _EXTRA.finditer(title or "")] + [note or ""]
+    words = re.findall(r"[a-z0-9]+", " ".join(parts).lower())
+    return frozenset(w for w in words if w not in _GENERIC)
+
+
+def _rank(artist: str, album: str, ntracks: int, various: bool, edition: frozenset, got: dict,
+          upc_hit: bool = False) -> tuple | None:
+    """Sort key for a store result (higher is better), or None if it is not this album."""
+    name = _matches(artist, album, got["artist"], got["album"], various)
+    if upc_hit:                       # found by barcode: only the artist has to agree
+        name = name or (1.0 if various or not artist or similar(artist, got["artist"]) >= 0.8 else 0.0)
+    if not name:
+        return None
+    tracks = 1 if not ntracks or not got.get("tracks") else (2 if got["tracks"] == ntracks else 0)
+    same_edition = 1 if edition_words(got["album"]) == edition else 0
+    return (1 if upc_hit else 0, tracks, same_edition, round(name, 3), 0 if got.get("cleaned") else 1)
+
+
+def _best(hits: list[tuple]) -> list[tuple]:
+    """The best-ranked album: its images are used, never the largest image of any edition.
+    Albums that tie on everything but explicit/clean count as one (same cover)."""
+    if not hits:
+        return []
+    top = max(h[0] for h in hits)
+    return sorted((h for h in hits if h[0][:4] == top[:4]), key=lambda h: h[0], reverse=True)
 
 
 _artist_albums: dict = {}
@@ -139,9 +191,17 @@ def settle_still(folder: Path, cfg: dict, jpeg: bytes | None = None) -> str:
     return f"both {right.name} and {wrong.name} exist and differ - left alone"
 
 
-def _itunes(cfg, ua, artist, album, various, ntracks, notes, found=None):
+def _upc_candidates(barcode: str) -> list[str]:
+    digits = "".join(c for c in barcode or "" if c.isdigit()).lstrip("0")
+    if len(digits) < 8:
+        return []
+    return list(dict.fromkeys([digits.zfill(12) if len(digits) <= 12 else digits, digits.zfill(13)]))
+
+
+def _itunes(cfg, ua, artist, album, various, ntracks, notes, found=None, barcode="", edition_note=""):
     """Apple's public catalogue search (the same artwork Apple Music shows).
-    Tries: artist + album search, album-title search, then the artist's full album list."""
+    Tries: the barcode (exact product), the artist's full album list, artist + album search,
+    then album-title search."""
     base = "https://itunes.apple.com"
     common = f"&media=music&country={cfg['itunes_country']}"
     get = lambda url: json.loads(_itunes_get(url, ua, cfg["itunes_interval"])).get("results", [])
@@ -158,7 +218,17 @@ def _itunes(cfg, ua, artist, album, various, ntracks, notes, found=None):
 
     # The artist's own album list is the most reliable route (Apple's text search often misses),
     # and it is cached, so it goes first.
-    queries = ([] if various or not artist else [("artist's album list", artist_albums)]) + [
+    def by_barcode():
+        for upc in _upc_candidates(barcode):
+            results = [r for r in get(f"{base}/lookup?upc={upc}&entity=album{common}")
+                       if r.get("wrapperType") == "collection"]
+            if results:
+                return results
+        return []
+
+    edition = edition_words(album, edition_note)
+    queries = ([("barcode", by_barcode)] if _upc_candidates(barcode) else []) + \
+              ([] if various or not artist else [("artist's album list", artist_albums)]) + [
         ("artist + album", lambda: get(f"{base}/search?term={quote(album if various else f'{artist} {album}', safe='')}&entity=album&limit=50{common}")),
         ("album title", lambda: get(f"{base}/search?term={quote(bare, safe='')}&entity=album&attribute=albumTerm&limit=50{common}")),
     ]
@@ -166,52 +236,61 @@ def _itunes(cfg, ua, artist, album, various, ntracks, notes, found=None):
     for name, run in queries:
         results = run()
         for r in results:
-            score = _matches(artist, album, r.get("artistName", ""), r.get("collectionName", ""), various)
+            score = _rank(artist, album, ntracks, various, edition,
+                          {"artist": r.get("artistName", ""), "album": r.get("collectionName", ""),
+                           "tracks": r.get("trackCount"), "cleaned": r.get("collectionExplicitness") == "cleaned"},
+                          upc_hit=name == "barcode")
             art = r.get("artworkUrl100")
             if score and art:
-                score += 0.1 if r.get("trackCount") == ntracks else 0
                 big = re.sub(r"/\d+x\d+[a-z]*(-\d+)?\.(jpg|png)$", f"/{cfg['max_size']}x{cfg['max_size']}bb.jpg", art)
-                hits.append((score, big, r.get("collectionId")))
+                hits.append((score, big, r.get("collectionId"), r.get("collectionName", ""), r.get("trackCount")))
         notes.append(f"iTunes/Apple Music, {name}: {len(results)} result(s), {len(hits)} matching")
         if hits:
             break
         if results:      # show what came back, so a matching problem can be diagnosed from the report
             notes.append("    e.g. " + "; ".join(f"{r.get('artistName')} / {r.get('collectionName')}" for r in results[:4]))
-    hits.sort(key=lambda h: h[0], reverse=True)
-    if found is not None and hits and hits[0][2]:
-        found["apple_album_id"] = str(hits[0][2])
-    return list(dict.fromkeys(u for _, u, _ in hits))[:3]
+    best = _best(hits)
+    if best:
+        others = sorted({f"{h[3]} ({h[4]} tracks)" for h in hits if h not in best})
+        notes.append(f"    using: {best[0][3]} ({best[0][4]} tracks{', matched by barcode' if best[0][0][0] else ''})"
+                     + (f"; not used: {'; '.join(others)}" if others else ""))
+    if found is not None and best and best[0][2]:
+        found["apple_album_id"] = str(best[0][2])
+    return list(dict.fromkeys(h[1] for h in best))[:2]
 
 
 def apple_album_id(cfg: dict, *, artist: str, album: str, various: bool = False, ntracks: int = 0,
-                   notes: list[str] | None = None) -> str | None:
+                   notes: list[str] | None = None, barcode: str = "", edition_note: str = "") -> str | None:
     """Apple Music id of the album (same matching as the cover search), or None."""
     found: dict = {}
     try:
         _itunes(cfg["cover"], cfg["_user_agent"], artist, album, various, ntracks,
-                notes if notes is not None else [], found)
+                notes if notes is not None else [], found, barcode, edition_note)
     except (NetworkError, NotFound, ValueError) as e:
         if notes is not None:
             notes.append(f"iTunes/Apple Music: {e}")
     return found.get("apple_album_id")
 
 
-def _deezer(cfg, ua, artist, album, various, ntracks, notes):
+def _deezer(cfg, ua, artist, album, various, ntracks, notes, edition_note=""):
     q = quote(f'album:"{album}"' if various else f'artist:"{artist}" album:"{album}"')
     hits = []
     data = json.loads(http_get(f"https://api.deezer.com/search/album?q={q}&limit=25", ua)).get("data", [])
+    edition = edition_words(album, edition_note)
     for r in data:
-        score = _matches(artist, album, (r.get("artist") or {}).get("name", ""), r.get("title", ""), various)
+        score = _rank(artist, album, ntracks, various, edition,
+                      {"artist": (r.get("artist") or {}).get("name", ""), "album": r.get("title", ""),
+                       "tracks": r.get("nb_tracks")})
         if score and r.get("cover_xl"):
-            hits.append((score + (0.1 if r.get("nb_tracks") == ntracks else 0), r["cover_xl"]))
+            hits.append((score, r["cover_xl"]))
     notes.append(f"Deezer search: {len(data)} result(s), {len(hits)} matching artist + album")
-    return [u for _, u in sorted(hits, reverse=True)[:2]]
+    return [h[1] for h in _best(hits)][:2]
 
 
 def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntracks: int = 0,
                mbid: str = "", group_id: str = "", local_dirs: list[Path] = (),
                embedded_from: Path | None = None, only_local: bool = False,
-               found: dict | None = None) -> tuple[Cover | None, list[str]]:
+               found: dict | None = None, barcode: str = "", edition_note: str = "") -> tuple[Cover | None, list[str]]:
     """Largest usable image from `sources`; only if those yield nothing, the largest from
     `fallback_sources`. Slightly non-square images are centre-cropped to a square. Never raises.
 
@@ -268,10 +347,10 @@ def find_cover(cfg: dict, *, artist: str, album: str, various: bool = False, ntr
                     if art:
                         yield f"embedded in {Path(embedded_from).name}", art, None
                 elif name == "itunes" and album:
-                    for u in _itunes(c, ua, artist, album, various, ntracks, notes, found):
+                    for u in _itunes(c, ua, artist, album, various, ntracks, notes, found, barcode, edition_note):
                         yield "iTunes/Apple Music", http_get(u, ua), None
                 elif name == "deezer" and album:
-                    for u in _deezer(c, ua, artist, album, various, ntracks, notes):
+                    for u in _deezer(c, ua, artist, album, various, ntracks, notes, edition_note):
                         yield "Deezer", http_get(u, ua), None
                 elif name == "coverartarchive":
                     for kind, ident in (("release", mbid), ("release-group", group_id)):

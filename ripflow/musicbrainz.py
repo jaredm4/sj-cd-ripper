@@ -54,6 +54,7 @@ class Album:
     disc_total: int
     tracks: list[Track]
     genres: list[str] = field(default_factory=list)
+    disambiguation: str = ""      # MusicBrainz's edition note, e.g. "deluxe edition, explicit"
 
     @property
     def various(self) -> bool:
@@ -310,6 +311,7 @@ def build_album(rel: dict, medium: dict, prefs: dict | None = None) -> Album:
         artist_sort=sort, artist_ids=artist_ids, artists=artist_names, date=rel.get("date") or "",
         original_date=rg.get("first-release-date") or "",
         country=release_country(rel, prefs or {}) or rel.get("country") or "",
+        disambiguation=rel.get("disambiguation") or "",
         status=(rel.get("status") or "").lower(), release_type="; ".join(t.lower() for t in types if t),
         barcode=rel.get("barcode") or "", labels=labels, catalogs=catalogs, asin=rel.get("asin") or "",
         script=(rel.get("text-representation") or {}).get("script") or "", media=medium.get("format") or "",

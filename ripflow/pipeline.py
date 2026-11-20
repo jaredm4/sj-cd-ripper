@@ -300,6 +300,9 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
 
     # 4. cover art -------------------------------------------------------------
     cover = animated = None
+    # identify the album at the stores by barcode first, then by name, track count and edition
+    product = dict(barcode=album.barcode if album else flacs[0].tag("BARCODE", "UPC"),
+                   edition_note=album.disambiguation if album else "")
     # album memory (ripflow.json): the destination's own, or the source's when it has none yet
     memory = albumstate.load(dest_dir) or albumstate.load(src_dir)
     learned: dict = {}
@@ -311,7 +314,7 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
                                   mbid=album.mbid if album else "", group_id=album.group_id if album else "",
                                   local_dirs=[] if ignore_local_art else [dest_dir, src_dir],
                                   embedded_from=None if ignore_local_art else files[0],
-                                  only_local=only_local_art, found=found)
+                                  only_local=only_local_art, found=found, **product)
         say("\n== Cover art ==")
         for line in renamed + ([parked] if parked else []):
             say(f"  {line}")
@@ -331,7 +334,7 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
                 stored = memory.get("apple") or {}
                 known = stored.get("album_id") if stored.get("storefront") == storefront and not ignore_local_art else None
                 apple_id = found.get("apple_album_id") or known or apple_album_id(
-                    cfg, artist=artist, album=title, various=various, ntracks=len(items))
+                    cfg, artist=artist, album=title, various=various, ntracks=len(items), **product)
                 result = None
                 if not apple_id:
                     result = "album not found on Apple Music"

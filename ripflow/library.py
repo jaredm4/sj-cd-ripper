@@ -90,7 +90,7 @@ def album_info(cfg: dict, folder: Path, root: Path) -> dict:
     at_top = folder.resolve().parent == root.resolve()        # Artist folder holding loose tracks
     artist = get("ALBUMARTIST", "ALBUM ARTIST", "ALBUM_ARTIST", "ARTIST") or (folder.name if at_top else folder.parent.name)
     album = get("ALBUM") or ("" if at_top else folder.name)
-    return dict(artist=artist, album=album, ntracks=len(tracks), flac=flac,
+    return dict(artist=artist, album=album, ntracks=len(tracks), flac=flac, barcode=get("BARCODE", "UPC"),
                 mbid=get("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ ALBUM ID"),
                 group_id=get("MUSICBRAINZ_RELEASEGROUPID", "MUSICBRAINZ RELEASE GROUP ID"),
                 various=artist.lower() in VARIOUS or get("COMPILATION") == "1")
@@ -196,7 +196,7 @@ def _one_album(cfg: dict, folder: Path, root: Path, legacy: dict, *, dry_run: bo
     elif not has_still and c["enabled"]:
         cover, _ = find_cover(cfg, artist=info["artist"], album=info["album"], various=info["various"],
                               ntracks=info["ntracks"], mbid=info["mbid"], group_id=info["group_id"],
-                              local_dirs=[folder], embedded_from=info["flac"], found=found)
+                              local_dirs=[folder], embedded_from=info["flac"], found=found, barcode=info["barcode"])
         row["still"] = f"found ({cover.source}, {cover.width}x{cover.height})" if cover else NO_STILL
         mem["still_cover"] = {"result": "found" if cover else NO_STILL, "checked": albumstate.today()}
 
@@ -209,7 +209,8 @@ def _one_album(cfg: dict, folder: Path, root: Path, legacy: dict, *, dry_run: bo
         row["animated"] = f"skipped ({seen_anim['result']} on {seen_anim.get('checked', '?')})"
     else:
         apple_id = found.get("apple_album_id") or known_id or apple_album_id(
-            cfg, artist=info["artist"], album=info["album"], various=info["various"], ntracks=info["ntracks"])
+            cfg, artist=info["artist"], album=info["album"], various=info["various"], ntracks=info["ntracks"],
+            barcode=info["barcode"])
         if apple_id:
             mem["apple"] = {"album_id": apple_id, "storefront": storefront}
         if not apple_id:
