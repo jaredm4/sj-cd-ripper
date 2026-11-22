@@ -109,6 +109,14 @@ has more than one disc. As in Picard, each of `* : < > ? | "` becomes `_`, and a
 period becomes `_` (`_..And Justice for All`). Trailing periods stay on file names; on a
 folder name a trailing period also becomes `_` (`P.O.D_`), because Windows cannot store it.
 
+The album title includes the release's disambiguation comment, the grey text MusicBrainz shows
+after the title (or the release group's comment when the release has none), with each word
+capitalised: `Days of the New (Red Album)`, `The Art of Survival (Deluxe Edition)`. This keeps
+same-named albums apart and is used in the tags, the file names and the cover art search. A
+title that already contains the comment is left as it is, and comment parts listed in
+`[musicbrainz] title_comment_skip` (default `explicit`, `clean`) are left out. Turn it off with
+`title_comment = false`.
+
 ## Other files in the album folder
 
 `process` also brings along the album's other files from the source folder (`[files] extras`,

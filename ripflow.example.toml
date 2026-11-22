@@ -34,6 +34,9 @@ library = 'D:\Music'             # finished albums land here: <library>/<artist>
 # prefer_explicit = true                  # explicit editions over clean ones, unless the files are tagged Rating=Clean
 # max_track_diff_seconds = 7       # for non-disc-ID matches: reject releases whose track lengths differ more
 # genres = 3                       # how many MusicBrainz genres to write (0 = none)
+# title_comment = true             # add the release's disambiguation comment to the album title, title-cased:
+#                                  # "Days of the New (Red Album)" (tags, file names, store lookups)
+# title_comment_skip = ["explicit", "clean"]   # comment parts left out of the title
 
 [cover]
 # enabled = true

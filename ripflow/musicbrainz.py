@@ -290,6 +290,33 @@ def _credit(ac: list[dict]) -> tuple[str, list[str], list[str]]:
     return text, [c["artist"]["name"] for c in ac], [c["artist"]["id"] for c in ac]
 
 
+def title_case(text: str) -> str:
+    """Capitalise each word that is all lower case ("red album" -> "Red Album"), leaving words
+    that already have a capital alone ("US", "2xLP", "McCartney"). Words also start after a
+    bracket, slash or hyphen; an apostrophe does not start one ("don't" stays "Don't")."""
+    return re.sub(r"(?<![\w'’])([a-z])(\w*)",
+                  lambda m: m.group(0) if not m.group(0).islower() else m.group(1).upper() + m.group(2), text)
+
+
+def comment_for_title(rel: dict, skip: list[str]) -> str:
+    """The release's disambiguation comment (MusicBrainz shows it in grey after the title), or
+    else its release group's, title-cased, minus comma-separated parts in `skip` (such as
+    "explicit"). Empty when there is none."""
+    raw = (rel.get("disambiguation") or (rel.get("release-group") or {}).get("disambiguation") or "").strip()
+    drop = {s.strip().lower() for s in skip}
+    parts = [p.strip() for p in raw.split(",") if p.strip() and p.strip().lower() not in drop]
+    return title_case(", ".join(parts))
+
+
+def full_title(title: str, comment: str) -> str:
+    """"Title (Comment)", unless the title already says it: "Album (Deluxe Edition)" with the
+    comment "deluxe edition" stays as it is."""
+    if not comment:
+        return title
+    key = lambda s: re.sub(r"\W+", " ", s).strip().lower()
+    return title if key(comment) and key(comment) in key(title) else f"{title} ({comment})"
+
+
 def build_album(rel: dict, medium: dict, prefs: dict | None = None) -> Album:
     artist, artist_names, artist_ids = _credit(rel.get("artist-credit", []))
     rg = rel.get("release-group") or {}
@@ -307,7 +334,9 @@ def build_album(rel: dict, medium: dict, prefs: dict | None = None) -> Album:
     sort = sort_of(rel.get("artist-credit", []))
     types = [rg.get("primary-type") or "", *(rg.get("secondary-types") or [])]
     return Album(
-        mbid=rel["id"], group_id=rg.get("id", ""), title=rel.get("title", ""), artist=artist,
+        mbid=rel["id"], group_id=rg.get("id", ""), artist=artist,
+        title=full_title(rel.get("title", ""), comment_for_title(rel, (prefs or {}).get("title_comment_skip") or []))
+        if (prefs or {}).get("title_comment", True) else rel.get("title", ""),
         artist_sort=sort, artist_ids=artist_ids, artists=artist_names, date=rel.get("date") or "",
         original_date=rg.get("first-release-date") or "",
         country=release_country(rel, prefs or {}) or rel.get("country") or "",

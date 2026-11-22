@@ -38,6 +38,12 @@ DEFAULTS: dict = {
         "prefer_explicit": True,                  # unless the files carry a Rating=Clean tag
         "max_track_diff_seconds": 7,
         "genres": 3,
+        # Add the release's disambiguation comment (shown in grey after the title on MusicBrainz;
+        # the release group's when the release has none) to the album title, title-cased, in tags,
+        # file names and store lookups: "Days of the New (Red Album)". Comma-separated parts
+        # listed in title_comment_skip are left out.
+        "title_comment": True,
+        "title_comment_skip": ["explicit", "clean"],
     },
     "cover": {
         "enabled": True,
