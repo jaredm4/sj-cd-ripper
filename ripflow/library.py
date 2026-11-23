@@ -29,11 +29,10 @@ from .config import log
 from .cover import (LEGACY_STILL_STEMS, apple_album_id, find_cover, is_animated, migrate_legacy_names,
                     oversized_animation, park_static_webp, settle_still, write_replacing)
 from .flacfile import FlacError, read_info
-from .util import NetworkError, natural_key
+from .util import AUDIO, NetworkError, natural_key
 
-MUSIC = {".flac", ".mp3", ".m4a", ".aac", ".alac", ".ogg", ".oga", ".opus", ".wma", ".wav",
-         ".aif", ".aiff", ".ape", ".wv", ".mpc", ".dsf", ".dff", ".tak"}
-NO_ANIMATION = ("no animated cover on Apple Music", "album not found on Apple Music")
+MUSIC = AUDIO
+NO_ANIMATION = albumstate.NO_ANIMATION
 VARIOUS = {"various artists", "various", "va"}
 SYSTEM = {".git", "@eadir", "#recycle", "$recycle.bin", "system volume information", ".trash", ".trashes"}
 NO_STILL = "no still cover found"

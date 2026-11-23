@@ -7,6 +7,8 @@
 
 [paths]
 library = 'D:\Music'             # finished albums land here: <library>/<artist>/<album>/
+# ripped  = 'D:\Ripped'           # watch / rip file CDs here instead (default: the library), to check
+#                                  # them with `review` before they go into the library
 # staging = 'D:\ripflow\work'    # rips land here first (default: work/ next to this file)
 # logs    = 'D:\ripflow\logs'    # ripflow.log, ATTENTION.log, reports/ (default: logs/ next to this file)
 
@@ -83,6 +85,10 @@ library = 'D:\Music'             # finished albums land here: <library>/<artist>
 [rsgain]
 # enabled = true
 # args = ["easy", "--output", "{album}"]   # {album} = the finished album folder
+
+[network]
+# retries = 5                      # a failed web request (no connection, timeout, service busy/down) is
+# retry_wait = 5                   # retried this often, pausing 5, 10, 20, 40, 60 s; each pause is logged
 
 [naming]
 # album_dir = "{albumartist}/{album}"          # also available: {year}

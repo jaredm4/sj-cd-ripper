@@ -181,7 +181,9 @@ def _pick_medium(rel: dict, ntracks: int, discid: str | None, durations: list[fl
         attached = bool(discid) and any(d.get("id") == discid for d in m.get("discs", []))
         if attached:
             return m, worst
-        if worst > max_diff and not trust_length:
+        # Matching on length needs lengths: a release whose tracks mostly have none on
+        # MusicBrainz proves nothing (it used to pass as a perfect fit).
+        if not trust_length and (worst > max_diff or len(diffs) < max(1, (ntracks + 1) // 2)):
             continue
         if best is None or worst < best_diff:
             best, best_diff = m, worst
@@ -201,7 +203,7 @@ class Candidate:
 
 def rank(releases: list[dict], *, ntracks: int, discid: str | None, durations: list[float],
          prefs: dict, exact: bool, source: str = "rip", barcode: str = "", asin: str = "",
-         isrcs: list[str] = (), want_clean: bool = False) -> list[Candidate]:
+         isrcs: list[str] = (), want_clean: bool = False, ndiscs: int | None = None) -> list[Candidate]:
     """Rank candidate releases, best first (lowest key). Releases with no medium matching
     these files are left out.
 
@@ -211,6 +213,7 @@ def rank(releases: list[dict], *, ntracks: int, discid: str | None, durations: l
       3. Official before promo/bootleg
       4. not in avoid_countries
       5. explicit vs clean edition (explicit unless the files say Rating=Clean)
+         then: as many discs as the album folder holds (existing files only)
       6. format: CD first for rips; Digital Media, then CD, for existing FLAC files
       7. prefer_countries order, then everything else
       8. has a barcode at all
@@ -239,6 +242,7 @@ def rank(releases: list[dict], *, ntracks: int, discid: str | None, durations: l
                status_rank.get((rel.get("status") or "").lower(), 5),
                1 if country in avoid else 0,
                1 if wrong_rating else 0,
+               0 if not ndiscs or len(rel.get("media") or []) == ndiscs else 1,
                _format_tier(medium.get("format", ""), source),
                prefer.index(country) if country in prefer else len(prefer),
                0 if rel.get("barcode") else 1,
@@ -249,6 +253,12 @@ def rank(releases: list[dict], *, ntracks: int, discid: str | None, durations: l
         ranked.append(Candidate(key, rel, medium, worst, full, hits, country))
     ranked.sort(key=lambda c: c.key)
     return ranked
+
+
+def _media(rel: dict, medium: dict) -> str:
+    """The format, with the disc count when there are several: "CD", "3xCD"."""
+    n = len(rel.get("media") or [])
+    return (f"{n}x" if n > 1 else "") + (medium.get("format") or "?")
 
 
 def tier_size(ranked: list[Candidate]) -> int:
@@ -269,7 +279,7 @@ def report_lines(ranked: list[Candidate], *, total: int, ntracks: int, chosen: s
     for c in ranked:
         rel = c.release
         lines.append(f"{'->' if rel['id'] == chosen else '  '} {c.country or '??':3} {rel.get('date') or '?':10} "
-                     f"{c.medium.get('format') or '?':14} {rel.get('status') or '?':9} "
+                     f"{_media(rel, c.medium):14} {rel.get('status') or '?':9} "
                      f"barcode={rel.get('barcode') or '-':14}{'*' if c.key[0] == 0 else ' '} "
                      f"isrc={c.isrc_hits:2} meta={c.meta:2} maxdiff={c.worst:4.1f}s  {rel['id']}  {rel.get('title', '')}"
                      + (f" ({rel['disambiguation']})" if rel.get("disambiguation") else ""))
@@ -351,7 +361,8 @@ def build_album(rel: dict, medium: dict, prefs: dict | None = None) -> Album:
 
 def identify(mb: MusicBrainz, cfg: dict, infos: list[FlacInfo], *, discid: str | None,
              toc: Toc | None, forced_release: str | None = None, source: str = "rip",
-             chooser=None) -> Identification:
+             chooser=None, repick: bool = False, prefer_discid: bool = False,
+             ndiscs: int | None = None) -> Identification:
     """Find the release. source="rip": the disc ID decides, text search is only a fallback.
     source="files": disc ID / TOC hits and a text search on the existing tags are pooled, so a
     Digital Media release can win over the CD pressing the track lengths happen to match.
@@ -359,21 +370,37 @@ def identify(mb: MusicBrainz, cfg: dict, infos: list[FlacInfo], *, discid: str |
     chooser: optional callable(ranked, tier, resolve) used when several candidates fit the
     files equally well (see tier_size). It returns (release, medium) to use, or None to skip
     the album. `resolve(mbid)` fetches any release by id and returns (release, medium) or an
-    error message. Without a chooser the top-ranked release is used."""
+    error message. Without a chooser the top-ranked release is used.
+
+    repick: you turned down the release found before, so ignore the files' MUSICBRAINZ_ALBUMID
+    tag, gather candidates by disc ID / TOC and tag search, and always ask (chooser required).
+
+    prefer_discid: when the disc ID (real, or computed from CD-style files) is known to
+    MusicBrainz, use its releases instead of the MUSICBRAINZ_ALBUMID tag; the tag is used only
+    when MusicBrainz knows no release for the disc ID. A forced release id still comes first.
+
+    ndiscs: how many discs of this album the folder holds (existing files); releases with that
+    many discs rank higher. None for a rip (one disc in the drive says nothing about the set)."""
     prefs = cfg["musicbrainz"]
     out = Identification()
     ntracks = len(infos)
     durations = [i.seconds for i in infos]
-    barcodes = {i.tag("BARCODE", "UPC", "DISC_MCN", "MCN") for i in infos}
+    # When the files are tagged with a release and we look past it (--prefer-discid, or you
+    # turned it down), their BARCODE/ASIN tags came from that release and prove nothing about
+    # which release they are: only the barcode the disc itself carries (MCN) counts then.
+    tag_bound = (prefer_discid or repick) and any(i.tag("MUSICBRAINZ_ALBUMID") for i in infos)
+    # the disc's own barcode (MCN) first: it is read from the CD, a BARCODE tag may be anyone's
+    keys = ("DISC_MCN", "MCN") if tag_bound else ("DISC_MCN", "MCN", "BARCODE", "UPC")
+    barcodes = {i.tag(*keys) for i in infos}
     barcode = barcodes.pop() if len(barcodes) == 1 else ""
-    asins = {m.group(0) for i in infos for key in ("ASIN", "WWW", "URL")
-             for m in [re.search(r"\bB0[0-9A-Z]{8}\b", i.tag(key))] if m}
+    asins = set() if tag_bound else {m.group(0) for i in infos for key in ("ASIN", "WWW", "URL")
+                                     for m in [re.search(r"\bB0[0-9A-Z]{8}\b", i.tag(key))] if m}
     asin = asins.pop() if len(asins) == 1 else ""
     want_clean = any(i.tag("RATING", "ITUNESADVISORY").lower() in ("clean", "2") for i in infos)
     isrcs = [i.tag("ISRC").upper().replace("-", "") for i in infos]
     ranker = lambda rels, exact, did: rank(
         rels, ntracks=ntracks, discid=did, durations=durations, prefs=prefs, exact=exact, source=source,
-        barcode=barcode, asin=asin, isrcs=isrcs, want_clean=want_clean)
+        barcode=barcode, asin=asin, isrcs=isrcs, want_clean=want_clean, ndiscs=ndiscs)
 
     def resolve(mbid: str):
         """A release the user typed in: it only has to have a disc with the right track count."""
@@ -392,8 +419,9 @@ def identify(mb: MusicBrainz, cfg: dict, infos: list[FlacInfo], *, discid: str |
             return False
         found = (ranked[0].release, ranked[0].medium)
         tier = tier_size(ranked)
-        if chooser and tier > 1:
-            found = chooser(ranked, tier, resolve)
+        if chooser and (tier > 1 or repick):
+            found = chooser(ranked, max(tier, min(len(ranked), 5)) if repick else tier, resolve,
+                            heading="Pick the release to use" if repick else None)
             if found is None:
                 out.skipped, out.method = True, method
                 out.notes.append("you chose to skip this album")
@@ -420,10 +448,23 @@ def identify(mb: MusicBrainz, cfg: dict, infos: list[FlacInfo], *, discid: str |
     try:
         tagged = {i.tag("MUSICBRAINZ_ALBUMID") for i in infos}
         tagged_id = tagged.pop() if len(tagged) == 1 else ""
+        lookup_id = discid or (toc.discid if toc and toc.exact else None)
         for mbid, method, exact in ((forced_release, "forced release id", True),
                                     (tagged_id, "MUSICBRAINZ_ALBUMID tag", False)):
-            if not mbid:
+            if not mbid or (repick and method.startswith("MUSICBRAINZ")):
                 continue
+            if prefer_discid and lookup_id and method.startswith("MUSICBRAINZ"):
+                try:                          # the exact disc only, no fuzzy TOC match
+                    data = mb.by_disc(lookup_id, None)
+                except NotFound:
+                    data = {}
+                rels = (data.get("releases") or []) if data.get("id") == lookup_id else []
+                if rels and accept(rels, True, lookup_id, "disc ID (preferred over the MUSICBRAINZ_ALBUMID tag)"):
+                    if out.album and out.album.mbid != mbid:
+                        out.notes.append(f"the MUSICBRAINZ_ALBUMID tag had {mbid}; the disc ID gave another release")
+                    return out
+                out.notes.append(f"disc ID {lookup_id}: no release on MusicBrainz - using the "
+                                 "MUSICBRAINZ_ALBUMID tag")
             try:
                 if accept([mb.release(mbid)], exact, discid, method):
                     return out
@@ -433,7 +474,6 @@ def identify(mb: MusicBrainz, cfg: dict, infos: list[FlacInfo], *, discid: str |
 
         pool: dict[str, dict] = {}
         attached = None                      # disc id, if MusicBrainz knows this exact disc
-        lookup_id = discid or (toc.discid if toc and toc.exact else None)
         if lookup_id or toc:
             try:
                 data = mb.by_disc(lookup_id, toc, all_formats=source != "rip")
@@ -447,17 +487,27 @@ def identify(mb: MusicBrainz, cfg: dict, infos: list[FlacInfo], *, discid: str |
             elif data.get("title"):          # a "CD stub": user-submitted title/artist only
                 hint_artist, hint_album = data.get("artist", ""), data["title"]
                 out.notes.append(f"disc ID matches only a CD stub: {hint_artist} / {hint_album}")
-        if source == "rip" and pool and accept(list(pool.values()), bool(attached), attached,
+        if source == "rip" and not repick and pool and accept(list(pool.values()), bool(attached), attached,
                                                "disc ID" if attached else "fuzzy TOC (track lengths)"):
             return out
 
         artists = {i.tag("ALBUMARTIST", "ALBUM ARTIST", "ARTIST") for i in infos}
         albums = {i.tag("ALBUM") for i in infos}
         artist = hint_artist or (artists.pop() if len(artists) == 1 else "")
+        if pool and not attached and artist and artist != cfg["naming"]["unknown_artist"]:
+            # a lookup by track lengths knows nothing of the artist: drop other artists' releases
+            before = len(pool)
+            pool = {k: r for k, r in pool.items()
+                    if similar(_credit(r.get("artist-credit", []))[0], artist) >= 0.8}
+            if len(pool) < before:
+                out.notes.append(f"fuzzy TOC: dropped {before - len(pool)} release(s) by other artists")
         album = hint_album or (albums.pop() if len(albums) == 1 else "")
         if album and artist != cfg["naming"]["unknown_artist"]:
+            # the tag may already carry a disambiguation comment ripflow added: "X (Red Album)"
+            bare = strip_edition(album, all_brackets=True) or album
             hits = [h for h in mb.search(artist, album, ntracks)
-                    if similar(h.get("title", ""), album) >= 0.85 and h["id"] not in pool][:15]
+                    if max(similar(h.get("title", ""), album), similar(h.get("title", ""), bare)) >= 0.85
+                    and h["id"] not in pool][:15]
             full = [mb.release(h["id"]) for h in hits]
             if artist:
                 full = [r for r in full if similar(_credit(r.get("artist-credit", []))[0], artist) >= 0.8]
@@ -465,6 +515,14 @@ def identify(mb: MusicBrainz, cfg: dict, infos: list[FlacInfo], *, discid: str |
             out.notes.append(f"tag search ({artist or '?'} / {album}): {len(full)} more release(s)")
         if pool and accept(list(pool.values()), False, attached,
                            "disc/TOC lookup + tag search, ranked together"):
+            return out
+        if repick and chooser:               # nothing found: a pasted release id is the way out
+            found = chooser([], 0, resolve, heading="MusicBrainz found no other release for these files")
+            if found is None:
+                out.skipped, out.method = True, "your choice"
+                out.notes.append("you chose to skip this album")
+            else:
+                accept([found[0]], True, attached, "release id you entered")
             return out
     except NetworkError as e:
         out.offline = True

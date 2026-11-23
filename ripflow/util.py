@@ -1,10 +1,12 @@
 """Small shared helpers: HTTP, text matching, filename sanitising."""
 from __future__ import annotations
 
+import logging
 import re
 import time
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 from difflib import SequenceMatcher
 
@@ -17,23 +19,57 @@ class NetworkError(Exception):
     pass
 
 
-def http_get(url: str, ua: str, timeout: int = 30, retries: int = 3, headers: dict | None = None) -> bytes:
-    last: Exception | None = None
-    for attempt in range(retries):
+log = logging.getLogger("ripflow")
+
+# Audio file types ripflow recognises (it only processes .flac).
+AUDIO = {".flac", ".mp3", ".m4a", ".aac", ".alac", ".ogg", ".oga", ".opus", ".wma", ".wav",
+         ".aif", ".aiff", ".ape", ".wv", ".mpc", ".dsf", ".dff", ".tak"}
+
+# Set from [network] in the config (config.load): how often a failed request is retried and the
+# first pause; each later pause doubles, up to RETRY_MAX_WAIT seconds.
+RETRIES = 5
+RETRY_WAIT = 5.0
+RETRY_MAX_WAIT = 60.0
+_RETRYABLE = (429, 500, 502, 503, 504)
+
+
+def http_get(url: str, ua: str, timeout: int = 30, retries: int | None = None, headers: dict | None = None) -> bytes:
+    """GET a URL. A failure that may be temporary (no connection, a timeout, the service busy or
+    down: HTTP 429/5xx) is logged and retried after a pause - `retries` times (default RETRIES),
+    each pause twice the last - then NetworkError. 400/404 raise NotFound at once; other HTTP
+    errors (401, 403...) raise NetworkError at once, for the caller to handle."""
+    retries = RETRIES if retries is None else retries
+    host = urllib.parse.urlsplit(url).netloc
+    for attempt in range(retries + 1):
         req = urllib.request.Request(url, headers={"User-Agent": ua, "Accept": "*/*", **(headers or {})})
+        wait = min(RETRY_WAIT * 2 ** attempt, RETRY_MAX_WAIT)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
             if e.code in (400, 404):
                 raise NotFound(url) from None
-            last = e
-            if e.code not in (429, 500, 502, 503, 504):
-                break
+            if e.code not in _RETRYABLE:
+                raise NetworkError(f"{url}: {e}") from None
+            last: Exception = e
+            after = (e.headers or {}).get("Retry-After", "")
+            if after.strip().isdigit():
+                wait = min(max(wait, float(after)), RETRY_MAX_WAIT * 2)
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             last = e
-        time.sleep(2 * (attempt + 1))
+        if attempt == retries:
+            break
+        log.warning("%s request failed (%s); waiting %g s, retry %d of %d", host, _reason(last), wait,
+                    attempt + 1, retries)
+        time.sleep(wait)
+    log.warning("%s: giving up after %d retries (%s)", host, retries, _reason(last))
     raise NetworkError(f"{url}: {last}")
+
+
+def _reason(e: Exception) -> str:
+    if isinstance(e, urllib.error.HTTPError):
+        return f"HTTP {e.code}"
+    return str(getattr(e, "reason", None) or e) or type(e).__name__
 
 
 _EDITION = re.compile(

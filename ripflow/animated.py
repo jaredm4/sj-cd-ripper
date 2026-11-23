@@ -91,7 +91,7 @@ def motion_stream(storefront: str, album_id: str, interval: float = 0.0) -> str 
             time.sleep(wait)
         try:
             stats["catalog"] += 1
-            data = json.loads(http_get(url, BROWSER_UA, headers=headers, retries=1))
+            data = json.loads(http_get(url, BROWSER_UA, headers=headers))
             break
         except NetworkError as e:
             if attempt or "401" not in str(e):      # a stale token gets one refresh

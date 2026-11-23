@@ -12,6 +12,8 @@ from . import __version__
 DEFAULTS: dict = {
     "paths": {
         "library": "",   # required: where finished albums go (your Jellyfin music folder)
+        "ripped": "",    # where `watch` / `rip` file ripped CDs (default: library), e.g. a local
+                         # folder to `review` from into a library that may be on another machine
         "staging": "",   # default: <config dir>/work
         "logs": "",      # default: <config dir>/logs
     },
@@ -98,6 +100,10 @@ DEFAULTS: dict = {
     },
     "dr": {"enabled": True, "write_tags": True, "write_log": True},     # dynamic range (DR14)
     "rsgain": {"enabled": True, "args": ["easy", "--output", "{album}"]},
+    # A web request that fails in a way that may pass (no connection, a timeout, the service busy
+    # or down) is logged and retried this many times, pausing retry_wait seconds and twice as
+    # long each time after (5, 10, 20, 40, 60 s; at most 60), before ripflow gives up on it.
+    "network": {"retries": 5, "retry_wait": 5},
     "naming": {
         "album_dir": "{albumartist}/{album}",
         "track": "{albumartist} - {album} - {track:02d} {title}",
@@ -136,11 +142,15 @@ def load(explicit: str | None = None) -> dict:
             _merge(cfg, tomllib.load(f))
     p = cfg["paths"]
     p["library"] = Path(p["library"]).expanduser() if p["library"] else None
+    p["ripped"] = Path(p["ripped"]).expanduser() if p["ripped"] else p["library"]
     p["staging"] = Path(p["staging"]).expanduser() if p["staging"] else base / "work"
     p["logs"] = Path(p["logs"]).expanduser() if p["logs"] else base / "logs"
     cfg["_config_path"] = path
     contact = cfg["musicbrainz"]["contact"] or "https://github.com/ (no contact set)"
     cfg["_user_agent"] = f"ripflow/{__version__} ( {contact} )"
+    from . import util
+    util.RETRIES = max(0, int(cfg["network"]["retries"]))
+    util.RETRY_WAIT = max(0.0, float(cfg["network"]["retry_wait"]))
     return cfg
 
 

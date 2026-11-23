@@ -9,21 +9,22 @@ import os
 import re
 import shutil
 import subprocess
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from . import albumstate
+from . import albumstate, changes, disclog
 from .config import attention, log
 from .animated import Unavailable as AnimatedUnavailable, animated_cover
-from .cover import (apple_album_id, find_cover, migrate_legacy_names, oversized_animation, park_static_webp,
-                    settle_still, write_replacing)
+from .cover import (apple_album_id, find_cover, is_animated, migrate_legacy_names, oversized_animation,
+                    park_static_webp, settle_still, write_replacing)
 from .dr import measure_album, write_log as write_dr_log
 from .discid import Toc, toc_from_param, toc_from_samples
-from .flacfile import FlacError, FlacInfo, read_info, write_tags
+from .flacfile import FlacError, FlacInfo, read_info, read_picture, write_tags
 from .musicbrainz import Album, MusicBrainz, identify
 from .ripper import RipResult
-from .util import NetworkError, NotFound, ascii_punctuation, similar, lead_int, natural_key, safe_component, safe_field
+from .util import AUDIO, NetworkError, NotFound, ascii_punctuation, similar, lead_int, natural_key, safe_component, safe_field
 from .verify import check_many, pick_decoder
 
 
@@ -36,6 +37,8 @@ class Outcome:
     problems: list[str] = field(default_factory=list)
     report: list[str] = field(default_factory=list)
     album_report: Path | None = None     # copy of the report kept in the album folder
+    decision: str = ""                   # with --ask: "applied" (y), "skipped" (s) or "unchanged"
+    release: str = ""                    # MusicBrainz release id used, if any
 
     @property
     def ok(self) -> bool:
@@ -58,7 +61,21 @@ def _kept(cfg: dict, info: FlacInfo) -> dict[str, list[str]]:
     return {k: v for k, v in info.tags.items() if k in exact or (prefixes and k.startswith(prefixes))}
 
 
-def _album_tags(cfg: dict, album: Album, n: int, info: FlacInfo, discid: str | None) -> dict[str, list[str]]:
+def disc_isrcs(own: list[str], musicbrainz: list[str], repeated: set[str]) -> tuple[list[str], str]:
+    """A track's ISRCs and a note when one was replaced. The disc's own (or the file's) come
+    first and alone; MusicBrainz's are used when the track has none. An ISRC that the disc gives
+    to more than one track is likely a misread (drives can return the previous track's code), so
+    it stays only where MusicBrainz agrees or knows none; otherwise MusicBrainz's replace it."""
+    own = list(dict.fromkeys(v.upper().replace("-", "") for v in own if v.strip()))
+    keep = [x for x in own if x not in repeated or x in musicbrainz or not musicbrainz]
+    if own and not keep:
+        return list(musicbrainz), (f"ISRC {', '.join(own)} is on another track of this disc too; "
+                                   f"MusicBrainz has {', '.join(musicbrainz)} - using that")
+    return keep or list(musicbrainz), ""
+
+
+def _album_tags(cfg: dict, album: Album, n: int, info: FlacInfo, discid: str | None,
+                repeated: set[str] = frozenset(), notes: list | None = None) -> dict[str, list[str]]:
     t = album.tracks[n - 1]
     one = lambda v: [str(v)] if v not in ("", None) else []
     tags = {
@@ -79,8 +96,10 @@ def _album_tags(cfg: dict, album: Album, n: int, info: FlacInfo, discid: str | N
         "MUSICBRAINZ_TRACKID": one(t.recording_id), "MUSICBRAINZ_RELEASETRACKID": one(t.track_id),
     }
     kept = _kept(cfg, info)
-    # ISRCs: what the file/disc carried first, then any further ones MusicBrainz knows
-    isrcs = list(dict.fromkeys([v.upper().replace("-", "") for v in kept.pop("ISRC", [])] + t.isrcs))
+    # ISRCs: the disc's / file's own; MusicBrainz's where there are none or one looks misread
+    isrcs, note = disc_isrcs(kept.pop("ISRC", []), t.isrcs, repeated)
+    if note and notes is not None:
+        notes.append(f"track {n}: {note}")
     tags.update(kept)
     tags["ISRC"] = isrcs
     if discid:
@@ -191,8 +210,13 @@ def _same(a: Path, b: Path) -> bool:
 def process_folder(cfg: dict, folder: Path, *, move: bool = False, dry_run: bool = False,
                    forced_release: str | None = None, rip: RipResult | None = None,
                    no_cover: bool = False, ignore_local_art: bool = False, only_local_art: bool = False,
-                   chooser=None) -> list[Outcome]:
-    """Process every album found under `folder`. One album = one directory (+ disc number)."""
+                   chooser=None, confirm: bool = False, show_art: bool = False,
+                   prefer_discid: bool = False) -> list[Outcome]:
+    """Process every album found under `folder`. One album = one directory (+ disc number).
+
+    confirm (process --ask, review): before changing anything, show a before/after table and
+    ask y (go ahead), n (wrong release: pick another) or s (skip the album; Outcome.decision
+    says which). show_art: also open a before/after picture of the cover art."""
     folder = Path(folder)
     if cfg["paths"]["library"] is None:
         raise SystemExit("set [paths] library in ripflow.toml first")
@@ -211,15 +235,37 @@ def process_folder(cfg: dict, folder: Path, *, move: bool = False, dry_run: bool
         groups.setdefault((p.parent if rip is None else folder, disc), []).append(p)
     if not groups:
         log.warning("no FLAC files under %s", folder)
+    # An album folder with other audio files besides FLAC (say some tracks are .opus) is left
+    # alone: ripflow would see too few tracks to match it, and would split the album.
+    outcomes: list[Outcome] = []
+    if rip is None:
+        for key in list(groups):
+            others = sorted((p.name for p in key[0].iterdir()
+                             if p.is_file() and p.suffix.lower() in AUDIO - {".flac"}), key=natural_key)
+            if others:
+                del groups[key]
+                if any(o.source == key[0] for o in outcomes):
+                    continue                 # one note per folder (multi-disc groups)
+                out = Outcome(source=key[0], label=key[0].name)
+                kinds = ", ".join(sorted({Path(n).suffix.lower() for n in others}))
+                out.problems.append(f"has {len(others)} non-FLAC audio file(s) ({kinds}) - left untouched; "
+                                    "replace them with FLAC to process this album")
+                out.report += [f"Folder: {key[0]}", "Non-FLAC audio files:"] + [f"  {n}" for n in others]
+                outcomes.append(_finish(cfg, out, dry_run))
     mb = MusicBrainz(cfg)
-    return [_process_album(cfg, mb, g, infos, move=move, dry_run=dry_run, forced_release=forced_release,
+    per_folder = {d: sum(1 for k in groups if k[0] == d) for d, _ in groups}
+    return outcomes + [_process_album(cfg, mb, g, infos, move=move, dry_run=dry_run, forced_release=forced_release,
                            rip=rip, no_cover=no_cover, ignore_local_art=ignore_local_art,
-                           only_local_art=only_local_art, chooser=chooser)
-            for g in groups.values()]
+                           only_local_art=only_local_art, chooser=chooser, confirm=confirm,
+                           show_art=show_art, prefer_discid=prefer_discid,
+                           ndiscs=None if rip else per_folder[key[0]])
+            for key, g in groups.items()]
 
 
 def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip, no_cover,
-                   ignore_local_art=False, only_local_art=False, chooser=None) -> Outcome:
+                   ignore_local_art=False, only_local_art=False, chooser=None, confirm=False,
+                   show_art=False, repick=False, checks=None, turned_down="", prefer_discid=False,
+                   ndiscs=None) -> Outcome:
     src_dir = files[0].parent
     out = Outcome(source=src_dir)
     say = out.report.append
@@ -228,7 +274,7 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
     say(f"source: {src_dir}  ({len(files)} files, {'ripped from CD' if rip else 'existing files'})")
 
     # 1. integrity -------------------------------------------------------------
-    checks = check_many(files, pick_decoder(cfg), cfg["verify"]["jobs"])
+    checks = checks or check_many(files, pick_decoder(cfg), cfg["verify"]["jobs"])
     say("\n== File integrity (full decode vs header, audio MD5) ==")
     for c in checks:
         say(f"  {c.status:18} md5={c.md5:8} {c.path.name}" + (f"  [{c.errors}]" if c.errors else "")
@@ -266,24 +312,57 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
 
     txt_id, txt_toc = _read_discid_txt(src_dir)
     tag_ids = {i.tag("MUSICBRAINZ_DISCID", "DISCID") for i in flacs}
-    discid = (rip.discid if rip else None) or txt_id or (tag_ids.pop() if len(tag_ids) == 1 else "") or None
+    # the disc as ripflow.json recorded it (at rip time, or `ripflow discids` from a rip log)
+    known = None if rip else disclog.stored(albumstate.load(src_dir), lead_int(flacs[0].tag("DISCNUMBER"), 1))
+    learned_disc = None
+    if not rip and not known:
+        # no record yet: a rip log of this disc in the folder (cyanrip's) serves as well
+        samples = [i.total_samples for i in flacs]
+        log_disc = next((d for d in disclog.logs_in(src_dir)
+                         if d.source.lower().startswith("rip") and disclog.fits(d.toc, samples)), None)
+        if log_disc:
+            known = log_disc.entry(albumstate.today())
+            learned_disc = (lead_int(flacs[0].tag("DISCNUMBER"), 1), known)
+    known_toc = toc_from_param(known.get("toc", "")) if known else None
+    if known and (not known_toc or known_toc.discid != known["discid"]
+                  or not disclog.fits(known_toc, [i.total_samples for i in flacs])):
+        say(f"  ripflow.json's disc {known['discid']} does not match these files - not used")
+        known = known_toc = None
+    discid = (rip.discid if rip else None) or (known and known["discid"]) or txt_id \
+        or (tag_ids.pop() if len(tag_ids) == 1 else "") or None
     cd_like = all(i.sample_rate == 44100 and i.bps == 16 and i.channels == 2 for i in flacs)
-    toc = txt_toc or (toc_from_samples([i.total_samples for i in flacs]) if cd_like else None)
-    say(f"\n== Identification ==\n  disc id: {discid or (toc.discid + ' (computed from track lengths)' if toc else 'n/a')}")
+    toc = known_toc or txt_toc or (toc_from_samples([i.total_samples for i in flacs]) if cd_like else None)
+    how = f" (from ripflow.json, recorded from {known.get('from', '?')})" if known else ""
+    say(f"\n== Identification ==\n  disc id: "
+        f"{(discid + how) if discid else (toc.discid + ' (computed from track lengths)' if toc else 'n/a')}")
     if toc:
         say(f"  toc: {toc.toc_param}")
 
     # A folder that still carries our discid.txt / rip log is one of our own CD rips.
-    from_cd = bool(rip or txt_id or any(src_dir.glob("rip*.log")))
+    from_cd = bool(rip or known or txt_id or any(src_dir.glob("rip*.log")))
     say(f"  treated as: {'CD rip (prefer CD releases)' if from_cd else 'existing files (prefer Digital Media)'}")
-    ident = identify(mb, cfg, flacs, discid=discid, toc=toc, forced_release=forced_release,
-                     source="rip" if from_cd else "files", chooser=chooser)
+    if turned_down:
+        say(f"  you turned down release {turned_down}; picking again")
+    if known and known.get("mcn"):
+        # the barcode the disc itself carries decides between releases (not written as a tag)
+        id_infos = [dataclasses.replace(i, tags={**i.tags, "DISC_MCN": [known["mcn"]]}) for i in flacs]
+    else:
+        id_infos = flacs
+    ident = identify(mb, cfg, id_infos, discid=discid, toc=toc, forced_release=None if repick else forced_release,
+                     source="rip" if from_cd else "files", chooser=chooser, repick=repick,
+                     prefer_discid=prefer_discid, ndiscs=ndiscs)
     say(f"  method: {ident.method}")
     for line in ident.candidates + [f"  note: {n}" for n in ident.notes]:
         say("  " + line)
     if ident.skipped:
         out.label = src_dir.name
+        out.decision = "skipped"
         say("\n(skipped at your request - nothing was changed)")
+        return _finish(cfg, out, dry_run)
+
+    if confirm and not dry_run and ident.offline:
+        out.label = src_dir.name
+        out.problems.append("MusicBrainz unreachable - album left untouched, re-run later")
         return _finish(cfg, out, dry_run)
 
     naming = cfg["naming"]
@@ -293,9 +372,16 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
     if album:
         artist, title, year = album.artist, album.title, (album.original_date or album.date)[:4]
         disc, disc_total, various = album.disc, album.disc_total, album.various
-        items = [Item(p, i, n, album.tracks[n - 1].title, _album_tags(cfg, album, n, i, discid))
+        seen = [v.upper().replace("-", "") for i in flacs for v in dict.fromkeys(i.tags.get("ISRC", []))]
+        repeated = {v for v in seen if seen.count(v) > 1}
+        isrc_notes: list[str] = []
+        items = [Item(p, i, n, album.tracks[n - 1].title,
+                      _album_tags(cfg, album, n, i, discid, repeated, isrc_notes))
                  for n, (p, i) in enumerate(zip(files, flacs), 1)]
+        for line in isrc_notes:
+            say(f"  {line}")
         out.label = f"{artist} - {title}"
+        out.release = album.mbid
     elif have_tags:
         f0 = flacs[0]
         artist, title = f0.tag("ALBUMARTIST", "ALBUM ARTIST", "ARTIST", default=naming["unknown_artist"]), f0.tag("ALBUM")
@@ -326,7 +412,9 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
     plain = ascii_punctuation if cfg["tags"]["ascii_punctuation"] else (lambda s: s)
     fields = {"albumartist": safe_field(plain(artist)), "album": safe_field(plain(title)),
               "year": year or "0000", "disc": disc}
-    dest_dir = Path(cfg["paths"]["library"]).joinpath(
+    # ripped CDs go to [paths] ripped (by default the library), everything else to the library
+    root = cfg["paths"]["ripped"] if rip else cfg["paths"]["library"]
+    dest_dir = Path(root).joinpath(
         *[safe_component(part.format(**fields), is_dir=True) for part in naming["album_dir"].split("/")])
     pattern = naming["track_multidisc"] if disc_total > 1 else naming["track"]
     targets = [dest_dir / (safe_component(pattern.format(
@@ -365,10 +453,17 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
     # album memory (ripflow.json): the destination's own, or the source's when it has none yet
     memory = albumstate.load(dest_dir) or albumstate.load(src_dir)
     learned: dict = {}
+    ask_now = confirm and not dry_run
+    make_animated = None
+    renamed: list[str] = []
+    parked: str | None = None
+    keep_anim: Path | None = None          # an existing animated cover.webp to keep
+    anim_plan = "not looked for"
     if cfg["cover"]["enabled"] and not no_cover and (not unknown or only_local_art):
         found: dict = {}
-        renamed = migrate_legacy_names(dest_dir, cfg) if dest_dir.is_dir() else []
-        parked = park_static_webp(dest_dir, cfg) if dest_dir.is_dir() else None
+        # with --ask these renames wait for your answer; now they are only described
+        renamed = migrate_legacy_names(dest_dir, cfg, dry_run=ask_now) if dest_dir.is_dir() else []
+        parked = park_static_webp(dest_dir, cfg, dry_run=ask_now) if dest_dir.is_dir() else None
         cover, notes = find_cover(cfg, artist=artist, album=title, various=various, ntracks=len(items),
                                   mbid=album.mbid if album else "", group_id=album.group_id if album else "",
                                   local_dirs=[] if ignore_local_art else [dest_dir, src_dir],
@@ -383,36 +478,109 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
             out.problems.append(f"no cover art of at least {cfg['cover']['min_size']}px found")
         else:
             say(f"  chosen: {cover.source} {cover.width}x{cover.height}")
-        # Apple Music's animated cover -> cover.webp (an existing one is kept unless --ignore-local-art)
-        existing = dest_dir / "cover.webp"
-        if cfg["cover"]["animated"] and not only_local_art and not unknown:
-            too_big = oversized_animation(existing, cfg)
-            if existing.exists() and not ignore_local_art and not too_big:
+        # Apple Music's animated cover -> cover.webp. An existing animated one (in the library
+        # folder, or brought from the source folder) is kept unless --ignore-local-art, or it
+        # is over the size limit and Apple Music has a new one.
+        if not ignore_local_art:
+            keep_anim = next((c for c in dict.fromkeys([dest_dir / "cover.webp", src_dir / "cover.webp"])
+                              if is_animated(c)), None)
+        too_big = oversized_animation(keep_anim, cfg) if keep_anim else 0.0
+        wants_anim = cfg["cover"]["animated"] and not only_local_art and not unknown
+        seen = memory.get("animated_cover") or {}
+        if wants_anim and not keep_anim and not ignore_local_art and seen.get("result") in albumstate.NO_ANIMATION:
+            # Apple Music had none when last asked (`covers --recheck` or --ignore-local-art asks again)
+            wants_anim = False
+            anim_plan = f"none ({seen['result']}, checked {seen.get('checked', '?')})"
+        if wants_anim:
+            anim_plan = (f"made again from Apple Music (the existing one is {too_big:.1f} MB)" if too_big else
+                         "keep the existing cover.webp" if keep_anim else
+                         "looked for on Apple Music" + (" after you confirm" if ask_now else ""))
+        elif keep_anim:
+            anim_plan = "keep the existing cover.webp"
+
+        def make_animated():
+            if not wants_anim:
+                return None
+            if keep_anim and not too_big:
                 say("  animated cover: keeping the existing cover.webp")
+                return None
+            if too_big:
+                say(f"  animated cover: the existing cover.webp is {too_big:.1f} MB, over the "
+                    f"{cfg['cover']['animated_max_mb']:g} MB limit - making it again")
+            storefront = cfg["cover"]["itunes_country"].lower()
+            stored = memory.get("apple") or {}
+            known = stored.get("album_id") if stored.get("storefront") == storefront and not ignore_local_art else None
+            apple_id = found.get("apple_album_id") or known or apple_album_id(
+                cfg, artist=artist, album=title, various=various, ntracks=len(items), **product)
+            made, result = None, None
+            if not apple_id:
+                result = "album not found on Apple Music"
+                say(f"  animated cover: {result}")
             else:
-                if too_big:
-                    say(f"  animated cover: the existing cover.webp is {too_big:.1f} MB, over the "
-                        f"{cfg['cover']['animated_max_mb']:g} MB limit - making it again")
-                storefront = cfg["cover"]["itunes_country"].lower()
-                stored = memory.get("apple") or {}
-                known = stored.get("album_id") if stored.get("storefront") == storefront and not ignore_local_art else None
-                apple_id = found.get("apple_album_id") or known or apple_album_id(
-                    cfg, artist=artist, album=title, various=various, ntracks=len(items), **product)
-                result = None
-                if not apple_id:
-                    result = "album not found on Apple Music"
-                    say(f"  animated cover: {result}")
-                else:
-                    learned["apple"] = {"album_id": apple_id, "storefront": storefront}
-                    try:
-                        animated = animated_cover(cfg, apple_id)
-                        result = "created" if animated else "no animated cover on Apple Music"
-                        say(f"  {animated.note}" if animated else f"  animated cover: {result}"
-                            + (" (keeping the existing cover.webp)" if too_big else ""))
-                    except (AnimatedUnavailable, NetworkError, NotFound, OSError, subprocess.SubprocessError) as e:
-                        say(f"  animated cover: not available ({e})")
-                if result:
-                    learned["animated_cover"] = {"result": result, "checked": albumstate.today()}
+                learned["apple"] = {"album_id": apple_id, "storefront": storefront}
+                try:
+                    made = animated_cover(cfg, apple_id)
+                    result = "created" if made else "no animated cover on Apple Music"
+                    say(f"  {made.note}" if made else f"  animated cover: {result}"
+                        + (" (keeping the existing cover.webp)" if too_big else ""))
+                except (AnimatedUnavailable, NetworkError, NotFound, OSError, subprocess.SubprocessError) as e:
+                    say(f"  animated cover: not available ({e})")
+            if result:
+                learned["animated_cover"] = {"result": result, "checked": albumstate.today()}
+            return made
+
+        if not ask_now:
+            animated = make_animated()
+
+    # --ask: show everything that is about to change and wait for your answer ---------
+    if ask_now:
+        rows = _change_rows(cfg, src_dir, dest_dir, files, items, targets, extras, move, cover,
+                            renamed + ([parked] if parked else []), anim_plan, no_cover)
+        print(f"\n== Proposed changes: {out.label} ==")
+        if album:
+            facts = [x for x in (album.country, album.date, album.media, ", ".join(album.labels[:2]),
+                                 album.barcode and f"barcode {album.barcode}") if x]
+            print(f"MusicBrainz: {album.title} ({' | '.join(facts)})  found by: {ident.method}\n"
+                  f"             https://musicbrainz.org/release/{album.mbid}")
+        else:
+            print("MusicBrainz: no match" + (" (unreachable)" if ident.offline else ""))
+        for p in out.problems:
+            print(f"Attention: {p}")
+        same_embed = cover is not None and all(_embedded(f) == cover.embed[0] for f in files)
+        if _nothing_to_change(rows, same_embed, cover):
+            out.decision = "unchanged"
+            out.dest = src_dir                 # nothing was filed anywhere
+            log.info("No changes needed: %s", out.label)
+            say("\n  No changes needed - nothing was written")
+            return _finish(cfg, out, dry_run)
+        print(changes.render(rows) if rows else "(no changes to tags, names or art)")
+        art_shown = cfg["cover"]["enabled"] and not no_cover
+        view = (lambda: _show_art(cfg, src_dir, dest_dir, files[0], cover, no_cover)) if art_shown else None
+        if show_art and view:
+            view()
+        answer = changes.ask(view)
+        if answer == "n":
+            if chooser is None:
+                print("  (no release prompt available here, so the album is skipped)")
+                answer = "s"
+            else:
+                return _process_album(cfg, mb, files, infos, move=move, dry_run=dry_run, forced_release=None,
+                                      rip=rip, no_cover=no_cover, ignore_local_art=ignore_local_art,
+                                      only_local_art=only_local_art, chooser=chooser, confirm=confirm,
+                                      show_art=show_art, repick=True, checks=checks, prefer_discid=prefer_discid,
+                                      ndiscs=ndiscs,
+                                      turned_down=album.mbid if album else "(no match)")
+        if answer == "s":
+            out.decision = "skipped"
+            say("\n(skipped at your request - nothing was changed)")
+            return _finish(cfg, out, dry_run)
+        out.decision = "applied"
+        say("\n  you confirmed the changes")
+        if cfg["cover"]["enabled"] and not no_cover and (not unknown or only_local_art) and dest_dir.is_dir():
+            for line in migrate_legacy_names(dest_dir, cfg) + [x for x in [park_static_webp(dest_dir, cfg)] if x]:
+                say(f"  {line}")
+        if make_animated:
+            animated = make_animated()
 
     # 5. dynamic range (measured now, written with the other tags) --------------
     dr_rows = None
@@ -451,6 +619,10 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
                 out.problems.append(f"header changed unexpectedly after tagging: {tgt.name}")
     if animated:
         write_replacing(dest_dir / "cover.webp", animated.webp)
+    elif keep_anim and keep_anim.parent != dest_dir and not (dest_dir / "cover.webp").exists():
+        # (an oversized one too, when no new one could be made: better than none)
+        relocate(str(keep_anim), str(dest_dir / "cover.webp"))
+        say("  animated cover.webp brought along from the source folder")
     if cover:
         say(f"  still cover {settle_still(dest_dir, cfg, cover.jpeg)}")
     if dr_rows and cfg["dr"]["write_log"]:
@@ -483,15 +655,32 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
         (dest_dir / "discid.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     elif (src_dir / "discid.txt").is_file() and move and not _same(src_dir, dest_dir):
         (src_dir / "discid.txt").unlink()
+    # a ripped disc: its disc ID, exact TOC and the disc's own barcode, for later `process` runs
+    if rip and rip.discid and rip.log_path and rip.log_path.is_file():
+        rtoc, logged, mcn = disclog.from_cyanrip(disclog.read_text(rip.log_path))
+        if rtoc and rtoc.discid == rip.discid:
+            entry = disclog.DiscLog(rtoc, "rip.log" if disc_total == 1 else f"rip-disc{disc}.log",
+                                    disc, mcn).entry(albumstate.today())
+        else:
+            entry = {"discid": rip.discid, "from": "rip", "recorded": albumstate.today()}
+        learned[disclog.KEY] = {**(memory.get(disclog.KEY) or {}), str(disc or 1): entry}
+    elif learned_disc and not disclog.stored(memory, learned_disc[0]):
+        # read from the folder's rip log this time: record it for next time
+        learned[disclog.KEY] = {**(memory.get(disclog.KEY) or {}), str(learned_disc[0]): learned_disc[1]}
     # album memory: whatever the source folder knew, plus what was learned now
     if memory or learned:
         albumstate.save(dest_dir, {**memory, **learned})
         if move and not _same(src_dir, dest_dir) and (src_dir / albumstate.FILE).is_file():
             (src_dir / albumstate.FILE).unlink()
-    if move and not rip and not _same(src_dir, dest_dir):
-        for extra in src_dir.glob("rip*.log"):          # carry earlier rip logs along
-            if not (dest_dir / extra.name).exists():
-                shutil.move(str(extra), str(dest_dir / extra.name))
+    if not rip and not _same(src_dir, dest_dir):
+        # the rip logs of an earlier `watch`/`rip` (rip.log, rip-disc2.log...) come along, copied
+        # or moved like the tracks; they describe how the audio was read, which stays true
+        for extra in sorted(src_dir.iterdir(), key=lambda f: natural_key(f.name)):
+            name = extra.name.lower()
+            if extra.is_file() and (name == "rip.log" or fnmatch.fnmatchcase(name, "rip-disc*.log")) \
+                    and not (dest_dir / extra.name).exists():
+                relocate(str(extra), str(dest_dir / extra.name))
+                say(f"  rip log brought along: {extra.name}")
     if move and not _same(src_dir, dest_dir):
         for old in src_dir.glob("ripflow-report*.log"):  # it describes the files as they were
             old.unlink()
@@ -499,6 +688,102 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
         src_dir.rmdir()
     out.album_report = dest_dir / (REPORT if disc_total == 1 else f"ripflow-report-disc{disc}.log")
     return _finish(cfg, out, dry_run)
+
+
+def _current_still(cfg: dict, *folders: Path) -> Path | None:
+    """The still cover image already in the album folder, if any."""
+    still = cfg["cover"]["animated_still_name"]
+    names = ["cover.jpg", still, "cover orig.jpg", "cover.png", Path(still).stem + ".webp", "folder.jpg", "front.jpg"]
+    return next((f / n for f in dict.fromkeys(folders) for n in names if (f / n).is_file()), None)
+
+
+def _embedded(path: Path) -> bytes | None:
+    try:
+        return read_picture(path)
+    except (FlacError, OSError):
+        return None
+
+
+def _change_rows(cfg, src_dir, dest_dir, files, items, targets, extras, move, cover, cover_renames,
+                 anim_plan, no_cover) -> list[tuple[str, str, str]]:
+    """What --ask shows: (what, before, after) for everything this run is about to change."""
+    rows: list[tuple[str, str, str]] = []
+    if _same(src_dir, dest_dir):
+        verb = "renamed in place"
+    else:
+        verb = "moved to " if move else "copied to "
+        lib = Path(cfg["paths"]["library"])
+        where = f"<library>{os.sep}{dest_dir.relative_to(lib)}" if lib in dest_dir.parents else str(dest_dir)
+        rows.append(("folder", str(src_dir), verb + where))
+    for n, (it, tgt) in enumerate(zip(items, targets), 1):
+        if it.src.name != tgt.name:
+            rows.append((f"file #{n}", it.src.name, tgt.name))
+    for f, t in extras:
+        rows.append(("extra file", f.name, t.name if t.name != f.name else "brought along"))
+    if not _same(src_dir, dest_dir):
+        for f in sorted(src_dir.glob("*.log"), key=lambda f: natural_key(f.name)):
+            if f.name.lower() == "rip.log" or fnmatch.fnmatchcase(f.name.lower(), "rip-disc*.log"):
+                rows.append(("rip log", f.name, "brought along"))
+    rows += changes.tag_rows([it.info.tags for it in items], [it.tags for it in items])
+    if cfg["cover"]["enabled"] and not no_cover:
+        current = _current_still(cfg, src_dir, dest_dir)
+        old = current.read_bytes() if current else None
+        before = f"{current.name} {changes.picture_size(old)}" if current else changes.NONE
+        if cover is None:
+            rows.append(("cover image", before, "unchanged (no new cover found)"))
+        else:
+            same = " (the same image)" if old == cover.jpeg else ""
+            rows.append(("cover image", before, f"{cover.source} {cover.width}x{cover.height}{same}"))
+            ew, eh = cover.embed[1], cover.embed[2]
+            rows.append(("embedded art", changes.picture_size(_embedded(files[0])),
+                         f"{ew}x{eh} from the cover image, in every track"))
+        for line in cover_renames:
+            rows.append(("cover files", "", line.replace("would be ", "")))
+        rows.append(("animated cover", "cover.webp" if (src_dir / "cover.webp").exists()
+                     or (dest_dir / "cover.webp").exists() else changes.NONE, anim_plan))
+    if cfg["dr"]["enabled"]:
+        old_dr = items[0].info.tag("ALBUM DYNAMIC RANGE") if items else ""
+        rows.append(("dynamic range", f"DR{old_dr}" if old_dr else changes.NONE, "measured after you confirm"))
+    if cfg["rsgain"]["enabled"]:
+        old_rg = items[0].info.tag("REPLAYGAIN_ALBUM_GAIN") if items else ""
+        rows.append(("ReplayGain", old_rg or changes.NONE, "rsgain runs after you confirm"))
+    return rows
+
+
+def _nothing_to_change(rows, same_embed: bool, cover) -> bool:
+    """True when the --ask rows hold nothing that would change the album (copying it as it is
+    to another folder does not count)."""
+    def unchanged(what: str, before: str, after: str) -> bool:
+        if what in ("folder", "rip log"):
+            return True
+        if what == "extra file":
+            return after == "brought along"
+        if what == "cover image":
+            return after.startswith("unchanged") or after.endswith("(the same image)")
+        if what == "embedded art":
+            return cover is None or same_embed
+        if what == "animated cover":
+            return not after.startswith(("looked for", "made again"))
+        if what in ("dynamic range", "ReplayGain"):
+            return before != changes.NONE
+        return False                       # renamed files, tags, cover file renames
+    return all(unchanged(*r) for r in rows)
+
+
+def _show_art(cfg, src_dir, dest_dir, first_file, cover, no_cover) -> None:
+    """Open a before/after picture of the cover art in the default image viewer."""
+    if no_cover or not cfg["cover"]["enabled"]:
+        return
+    current = _current_still(cfg, src_dir, dest_dir)
+    tiles = [(f"now: {current.name}" if current else "now: no cover file", current.read_bytes() if current else None),
+             ("now: embedded", _embedded(first_file)),
+             (f"new: {cover.source}" if cover else "new: none found", cover.jpeg if cover else None)]
+    preview = changes.art_preview(tiles)
+    if preview:
+        print(f"  cover art before/after: {preview}")
+        changes.open_file(preview)
+    else:
+        print("  (the art preview needs Pillow)")
 
 
 def _finish(cfg: dict, out: Outcome, dry_run: bool) -> Outcome:

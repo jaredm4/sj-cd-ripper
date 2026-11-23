@@ -26,7 +26,11 @@ watch (daemon)        process <folder>
 
 ## Commands
 
-Run from the folder that contains `ripflow.toml`:
+Run from the folder that contains `ripflow.toml`. Ripped CDs are filed into `[paths] ripped`
+if it is set, otherwise into `[paths] library`; everything else goes into the library. Setting
+`ripped` to a local folder lets you rip there, check the results with
+`python -m ripflow review <ripped folder>` (add `--move` to empty it as you go), and file them
+into a library that may be on another machine.
 
 | Command | What it does |
 |---|---|
@@ -38,6 +42,9 @@ Run from the folder that contains `ripflow.toml`:
 | `python -m ripflow process <folder> --ignore-local-art` | Ignores existing `cover.jpg` / embedded art and searches online again. |
 | `python -m ripflow process <folder> --only-local-art` | Uses only a `cover`/`folder`/`front` `.jpg`/`.png`/`.webp` in the album folder (newest file wins). No online lookup; embedded art is ignored and replaced with a fresh 600 px copy. |
 | `python -m ripflow process <folder> --auto` | Never asks which release to use (see below). |
+| `python -m ripflow process <folder> --ask [--show-art]` | Shows a before/after table of every change and asks first (see below). |
+| `python -m ripflow discids <root> [--dry-run]` | Records the disc IDs found in rip logs (cyanrip, EAC, XLD, ripflow's own) in each album's `ripflow.json` (see below). |
+| `python -m ripflow review <root> [--include-skipped] [--prefer-discid]` | Goes through an existing library album by album with `--ask`, remembering where it got to (see below). |
 | `python -m ripflow covers <root> [--dry-run]` | Updates cover art across an existing library (see below). Audio files are not touched. |
 | `python -m ripflow verify <root>` | Whole-library integrity scan (replaces `check_flac.sh`, same TSV idea). |
 
@@ -51,6 +58,48 @@ Run from the folder that contains `ripflow.toml`:
   The same report is saved in the album folder as `ripflow-report.log` (`ripflow-report-disc2.log`
   and so on for multi-disc sets), replaced on each run; `logs/reports/` keeps every run.
 - If the tray closes itself on the same disc, it is recognised and not ripped again.
+
+## Disc IDs
+
+A disc ID read from the CD identifies it on MusicBrainz exactly. One worked out from the files'
+lengths matches only when the disc has no hidden first track and no data track (Enhanced CD);
+when MusicBrainz recognises a computed ID it is almost certainly right, but when it doesn't, that
+proves little. So ripflow keeps the real one: after a rip, `ripflow.json` records each disc's
+ID, its table of contents and, if cyanrip read one, the barcode the disc itself carries (never
+a barcode taken from MusicBrainz):
+
+    "discs": {"1": {"discid": "...", "toc": "1+12+257193+150+...", "mcn": "...",
+                    "from": "rip.log", "recorded": "2026-11-25"}}
+
+`process` and `review` use it first (before `discid.txt`, a `MUSICBRAINZ_DISCID` tag or an ID
+computed from the files), after checking it fits the files, and treat the album as a CD rip.
+
+A `MUSICBRAINZ_ALBUMID` tag in the files normally wins over the disc ID, so a release you once
+picked by hand sticks. `--prefer-discid` (for `process` and `review`) turns that round: if
+MusicBrainz knows the disc ID (recorded, from a tag, or computed from CD-style files), its
+releases are used - ranked as usual, and listed for you when several fit equally well - and the
+tag only when MusicBrainz knows no release for that disc ID. Use it to fix albums whose tag
+points at the wrong release. While looking past the tagged release, the files' `BARCODE` and
+`ASIN` tags (which came from that release) are not used as evidence; the barcode the disc itself
+carries (its MCN, from `ripflow.json` or the folder's `rip.log`) always is, and beats a
+`BARCODE` tag. Without a disc record in `ripflow.json`, `process` reads the folder's cyanrip
+`rip.log` (and records it for next time).
+
+For albums ripped before, `python -m ripflow discids <root>` reads the logs in each album folder
+- cyanrip's `rip.log` / `rip-disc2.log`, ripflow's `discid.txt` and `ripflow-report*.log`
+(only IDs read from a disc, not computed ones), and EAC or XLD logs (their "TOC of the
+extracted CD" table, UTF-16 or not; an Enhanced CD's data track is left out as MusicBrainz
+does) - checks that each fits the files (same number of tracks, each within 3 s), and records it
+under its disc number. It never replaces a disc already recorded, and says when a log disagrees.
+`--dry-run` only shows what it would record.
+
+## When a web service does not answer
+
+MusicBrainz, the stores and Apple Music sometimes fail for a moment. A request that fails in a
+way that may pass (no connection, a timeout, the service busy or down) is logged - "musicbrainz.org
+request failed (HTTP 503); waiting 10 s, retry 2 of 5" - and tried again after 5, 10, 20, 40
+and 60 s. Only after that does ripflow give up on it. Change this under `[network]`
+(`retries`, `retry_wait`).
 
 ## What gets checked
 
@@ -77,6 +126,9 @@ Ranking, most important first:
 3. Official before promo/bootleg
 4. Not in `avoid_countries`
 5. Explicit edition over clean (reversed when the files are tagged `Rating=Clean`)
+   then, for existing files, as many discs as the album folder holds (a 1-disc release over a
+   3-disc set that shares the same disc). This only changes which release is recommended: it
+   never stops ripflow asking when releases otherwise fit equally well.
 6. Format: CD first for ripped discs; Digital Media, then CD, for existing FLAC files
    (Enhanced CD, HDCD and similar count as CD)
 7. `prefer_countries` order, then any other or no country
@@ -94,7 +146,56 @@ asks: Enter takes the recommended one, a number picks another, `a` shows weaker 
 too, a pasted release id or link uses that release, and `s` skips the album. `watch`, `rip`
 and `process --auto` never ask.
 
-Releases not matched by disc ID must also have matching track lengths. A folder in
+### Checking changes first: `process --ask`
+
+With `--ask`, `process` works out everything it would do, then stops before changing anything
+and shows it as a table: the MusicBrainz release (with its link), the folder and each renamed
+file, every tag that changes (old -> new; tags that differ per track such as MusicBrainz ids
+are summed up, titles are listed per track), the cover image and embedded art it will use,
+the animated cover, and the dynamic range and ReplayGain that are measured afterwards. Answer:
+
+- `y` - go ahead
+- `n` - wrong release: the release list comes up (ignoring the files' own MusicBrainz id tag),
+  you pick another or paste a release link, and you get a new table
+- `s` - skip the album; nothing is changed. If every album was skipped, the exit code is 3.
+
+- `v` - view the cover art: opens a before/after picture (the current cover file, the current
+  embedded art, and the new cover) in your default image viewer, then asks again
+
+If nothing would change (no renames, no tag changes, the same cover image and embedded art,
+dynamic range and ReplayGain already measured, no animated cover to look for), you are not
+asked: the log says `No changes needed` and nothing is written or copied.
+
+Anything else, or just Enter, asks again; upper or lower case both work. `--show-art` opens
+that picture for every album without asking (`v` is not offered with `--no-cover`). Renaming old cover files and making an
+animated cover wait for your `y`. If MusicBrainz cannot be reached, the album is left alone.
+
+### Going through a whole library: `review`
+
+`python -m ripflow review <root>` finds every album folder under `<root>` (a library, one
+artist, or one album) and runs `process --ask` on each, one at a time, so you confirm every
+album. An album folder is a folder with FLAC files and no folders with FLAC files below it;
+FLAC files lying in an artist folder next to its album folders are not part of any album and
+are ignored (listed at the start). An album folder that also holds other audio files (`.opus`,
+`.mp3`, `.m4a`...) is left alone and not recorded, so it comes up again once it holds only
+FLAC; `process` does the same, since it would see too few tracks to match the album and
+would leave the other files behind. Files go to `[paths] library` as with `process` - copied,
+unless `--move` - so you can check the new folders before putting them in place of the old.
+
+Your answer is saved in the album's `ripflow.json` (`"review": {"result": "applied",
+"unchanged" or "skipped", "date", "release"}`), in the source folder and, when the album was filed, in the new
+one too. A later run passes over albums you applied or skipped, and those that needed no changes
+(`--include-completed` brings those back), so you can stop (Ctrl+C) and
+carry on another time; `--include-skipped` brings the skipped ones back. Albums that stopped
+on a problem are not recorded and come up again. If MusicBrainz stops answering, the review
+stops so you can resume later. The cover options of `process` work here too (`--no-cover`,
+`--ignore-local-art`, `--only-local-art`, `--show-art`), as does `--limit N`. `watch` ignores
+all of this.
+
+Releases not matched by disc ID must also have matching track lengths, and MusicBrainz must
+know the length of at least half their tracks (a release without lengths proves nothing). For
+existing files, releases that MusicBrainz finds by track lengths alone must also be by the
+artist in the files' tags. A folder in
 `Unknown/` that came from a ripflow rip keeps being treated as a CD rip.
 
 No match: files go to `<library>/Unknown/<date time>/` as `Track 01...`, with a `discid.txt`
@@ -129,7 +230,9 @@ match. A lyric file that fits no track keeps its name. Files ripflow makes
 itself are never brought along, since they would describe the old files: `cover.jpg`,
 `cover.webp`, `cover-static.*`, `dr.txt`, `rip.log`, `discid.txt` and `ripflow.json` (with
 `--no-cover`, ripflow makes no cover, so the cover files do come along). A name that already
-exists in the library folder is not overwritten. `.cue` files are copied as they are, so the
+exists in the library folder is not overwritten. The rip logs of an earlier `watch` / `rip`
+(`rip.log`, `rip-disc2.log`...) come along too, copied or moved like the tracks, and an
+existing animated `cover.webp` is brought along rather than made again. `.cue` files are copied as they are, so the
 track names inside them refer to the old file names.
 
 ## Tags
@@ -142,6 +245,12 @@ The file-name rules then apply to the result, so a `"` becomes `_` and a leading
 On a MusicBrainz match all existing tags are dropped except the `[tags] keep` list
 (default: `ALBUM DYNAMIC RANGE`, `DYNAMIC RANGE`, `ISRC`, `LYRICS`, `UNSYNCEDLYRICS`,
 `MUSICBRAINZ_DISCID`, `UPC`).
+
+ISRCs: the code the disc carries (read while ripping) or the file already has is written, on
+its own; a track without one gets the ISRCs MusicBrainz knows for its recording. Drives
+sometimes misread a track's ISRC as the one before it, so a code the disc gives to two tracks
+is kept only where MusicBrainz agrees or has none; elsewhere MusicBrainz's is used, and the
+report says so.
 
 ### Animated covers
 
@@ -212,7 +321,8 @@ Each album folder can hold a small `ripflow.json` file (JSON) with facts ripflow
 not need to look up again: the album's Apple Music id, whether Apple has an animated cover, and
 whether any still cover exists. It lives with the album, so it survives moving the library,
 another machine or a fresh copy of ripflow. `process`, `watch` and `covers` read and update it;
-it never holds log output. Delete it to make ripflow forget an album. (Versions before this
+it never holds log output. `review` adds its record of your answer there. Delete it to make
+ripflow forget an album. (Versions before this
 kept the cover memory in `logs/covers-state.json`; `covers` still reads that file once and
 moves each album's entry into its `ripflow.json`, after which the old file can be deleted.)
 

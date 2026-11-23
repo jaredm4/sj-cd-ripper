@@ -20,6 +20,8 @@ from datetime import datetime
 from pathlib import Path
 
 FILE = "ripflow.json"
+# animated_cover results meaning "Apple Music has none": not looked for again unless asked
+NO_ANIMATION = ("no animated cover on Apple Music", "album not found on Apple Music")
 VERSION = 1
 
 

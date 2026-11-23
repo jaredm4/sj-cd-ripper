@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-from .musicbrainz import Candidate
+from .musicbrainz import Candidate, _media, comment_for_title, full_title
 
 _MBID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
@@ -13,10 +13,10 @@ def _describe(n: int, c: Candidate, recommended: bool) -> list[str]:
     infos = rel.get("label-info") or []
     label = ", ".join(dict.fromkeys(name for i in infos if (name := (i.get("label") or {}).get("name"))))
     catno = ", ".join(dict.fromkeys(x for i in infos if (x := i.get("catalog-number"))))
-    title = rel.get("title", "") + (f" ({rel['disambiguation']})" if rel.get("disambiguation") else "")
+    title = full_title(rel.get("title", ""), comment_for_title(rel, []))   # incl. the release group's comment
     regions = len(rel.get("release-events") or [])
     facts = [(c.country or "no country") + (f" (+{regions - 1} more regions)" if regions > 1 else ""),
-             rel.get("date") or "no date", c.medium.get("format") or "?"]
+             rel.get("date") or "no date", _media(rel, c.medium)]
     facts += [x for x in (label, catno and f"cat. {catno}",
                           rel.get("barcode") and f"barcode {rel['barcode']}") if x]
     if c.key[0] == 0:
@@ -28,21 +28,27 @@ def _describe(n: int, c: Candidate, recommended: bool) -> list[str]:
             f"      https://musicbrainz.org/release/{rel['id']}"]
 
 
-def ask_release(ranked: list[Candidate], tier: int, resolve):
-    """Interactive chooser for musicbrainz.identify(). Returns (release, medium) or None (skip)."""
+def ask_release(ranked: list[Candidate], tier: int, resolve, heading: str | None = None):
+    """Interactive chooser for musicbrainz.identify(). Returns (release, medium) or None (skip).
+    heading: shown instead of "N releases fit equally well" (when you are picking again)."""
     shown = tier
     while True:
-        print(f"\n{tier} MusicBrainz releases fit these files equally well"
-              + (f" ({len(ranked) - tier} weaker ones hidden)" if shown < len(ranked) else "") + ":")
+        hidden = f" ({len(ranked) - shown} weaker ones hidden)" if shown < len(ranked) else ""
+        print(f"\n{heading}{hidden}:" if heading else
+              f"\n{tier} MusicBrainz releases fit these files equally well{hidden}:")
         for n, c in enumerate(ranked[:shown], 1):
             print("\n".join(_describe(n, c, n == 1)))
         more = "a = show all, " if shown < len(ranked) else ""
+        pick = f"Choose 1-{shown} (Enter = 1), " if ranked else ""
         try:
-            answer = input(f"\nChoose 1-{shown} (Enter = 1), {more}paste a release id/link, or s = skip album: ").strip()
-        except EOFError:
-            answer = ""
+            answer = input(f"\n{pick}{more}paste a release id/link, or s = skip album: ").strip()
+        except EOFError:                     # input closed: as before, take the recommended one
+            return (ranked[0].release, ranked[0].medium) if ranked else None
         if not answer:
-            return ranked[0].release, ranked[0].medium
+            if ranked:
+                return ranked[0].release, ranked[0].medium
+            print("  paste a release id/link, or s to skip")
+            continue
         if answer.isdigit() and 1 <= int(answer) <= shown:
             c = ranked[int(answer) - 1]
             return c.release, c.medium
