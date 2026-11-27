@@ -308,13 +308,38 @@ def title_case(text: str) -> str:
                   lambda m: m.group(0) if not m.group(0).islower() else m.group(1).upper() + m.group(2), text)
 
 
-def comment_for_title(rel: dict, skip: list[str]) -> str:
+def _comment_key(text: str) -> str:
+    """For comparing comment texts: lower case, brackets and punctuation around it removed,
+    spaces and hyphens squeezed ("[E]" -> "e", "Explicit-Lyrics" -> "explicit lyrics")."""
+    return " ".join(re.sub(r"[\s\-_]+", " ", text.lower()).strip(" ()[]{}<>.:;!?'\"").split())
+
+
+_FORMAT_MARK = re.compile(r"\d{1,2}bits?|bits?|\d{2,3}(?:[.,]\d+)?k(?:hz)?|khz|hi|res|hires|mqa|sacd|dsd\d*", re.I)
+_FORMAT_FILL = re.compile(r"\d{1,3}(?:[.,]\d+)?|audio|and|flac|pcm|lossless|quality", re.I)
+
+
+def is_audio_format(text: str) -> bool:
+    """A comment part that only states the audio format: "24-bit 48kHz", "24bit/96kHz",
+    "16-Bit / 44.1 kHz", "24/96", "Hi-Res Audio", "MQA". Every word must be a format word, with
+    at least one real marker (bit, kHz, hi-res, MQA...) - so "1999" or "Volume 2" stay - except
+    the bare "24/96" form."""
+    t = text.strip(" ()[]{}").lower()
+    if re.fullmatch(r"\d{2}\s*/\s*\d{2,3}(?:[.,]\d+)?", t):
+        return True
+    words = [w for w in re.split(r"[\s/\-_+&|]+", t) if w]
+    return bool(words) and all(_FORMAT_MARK.fullmatch(w) or _FORMAT_FILL.fullmatch(w) for w in words) \
+        and any(_FORMAT_MARK.fullmatch(w) for w in words)
+
+
+def comment_for_title(rel: dict, skip: list[str], formats: bool = True) -> str:
     """The release's disambiguation comment (MusicBrainz shows it in grey after the title), or
-    else its release group's, title-cased, minus comma-separated parts in `skip` (such as
-    "explicit"). Empty when there is none."""
+    else its release group's, title-cased, minus comma-separated parts that are one of the
+    texts in `skip` - whole matches, ignoring case, spacing and brackets ("Explicit Lyrics",
+    "[E]"), so "Clean Bandit tribute" stays. Empty when there is none."""
     raw = (rel.get("disambiguation") or (rel.get("release-group") or {}).get("disambiguation") or "").strip()
-    drop = {s.strip().lower() for s in skip}
-    parts = [p.strip() for p in raw.split(",") if p.strip() and p.strip().lower() not in drop]
+    drop = {_comment_key(s) for s in skip}
+    parts = [p.strip() for p in re.split(r"[;]|,(?!\d)", raw)
+             if p.strip() and _comment_key(p) not in drop and not (formats and is_audio_format(p))]
     return title_case(", ".join(parts))
 
 
@@ -345,7 +370,8 @@ def build_album(rel: dict, medium: dict, prefs: dict | None = None) -> Album:
     types = [rg.get("primary-type") or "", *(rg.get("secondary-types") or [])]
     return Album(
         mbid=rel["id"], group_id=rg.get("id", ""), artist=artist,
-        title=full_title(rel.get("title", ""), comment_for_title(rel, (prefs or {}).get("title_comment_skip") or []))
+        title=full_title(rel.get("title", ""), comment_for_title(rel, (prefs or {}).get("title_comment_skip") or [],
+                                                                (prefs or {}).get("title_comment_skip_formats", True)))
         if (prefs or {}).get("title_comment", True) else rel.get("title", ""),
         artist_sort=sort, artist_ids=artist_ids, artists=artist_names, date=rel.get("date") or "",
         original_date=rg.get("first-release-date") or "",

@@ -42,10 +42,19 @@ DEFAULTS: dict = {
         "genres": 3,
         # Add the release's disambiguation comment (shown in grey after the title on MusicBrainz;
         # the release group's when the release has none) to the album title, title-cased, in tags,
-        # file names and store lookups: "Days of the New (Red Album)". Comma-separated parts
-        # listed in title_comment_skip are left out.
+        # file names and store lookups: "Days of the New (Red Album)". A comma-separated part
+        # that is one of the texts in title_comment_skip is left out - whole matches, ignoring
+        # case, spacing and brackets ("[E]" = "e"). Add your own; setting this replaces the list.
         "title_comment": True,
-        "title_comment_skip": ["explicit", "clean"],
+        "title_comment_skip": [
+            "explicit", "explicit lyrics", "explicit version", "explicit edition", "explicit content",
+            "explicit album", "explicit audio", "explicit release", "e", "parental advisory",
+            "clean", "clean lyrics", "clean version", "clean edition", "clean content", "clean album",
+            "clean audio", "clean release", "c", "edited", "edited version", "edited lyrics",
+            "censored", "censored version", "uncensored", "uncensored version"],
+        # also leave out comment parts that only state the audio format ("24-bit 48kHz",
+        # "24bit/96kHz", "16-Bit, 44.1 kHz", "24/96", "Hi-Res Audio", "MQA")
+        "title_comment_skip_formats": True,
     },
     "cover": {
         "enabled": True,

@@ -214,8 +214,13 @@ The album title includes the release's disambiguation comment, the grey text Mus
 after the title (or the release group's comment when the release has none), with each word
 capitalised: `Days of the New (Red Album)`, `The Art of Survival (Deluxe Edition)`. This keeps
 same-named albums apart and is used in the tags, the file names and the cover art search. A
-title that already contains the comment is left as it is, and comment parts listed in
-`[musicbrainz] title_comment_skip` (default `explicit`, `clean`) are left out. Turn it off with
+title that already contains the comment is left as it is, and a comment part that is one
+of the texts in `[musicbrainz] title_comment_skip` is left out. These are whole matches, ignoring
+case, spacing and brackets: "Explicit Lyrics", "clean version" and "[E]" go, "Clean Bandit
+tribute" stays. The default list holds the usual explicit / clean / edited / censored wordings;
+set your own list in `ripflow.toml` to change it (it replaces the default). Parts that only state
+the audio format - "24-bit 48kHz", "24bit/96kHz", "16-Bit, 44.1 kHz", "24/96", "Hi-Res Audio",
+"MQA" - are left out too (`title_comment_skip_formats = false` keeps them). Turn it off with
 `title_comment = false`.
 
 ## Other files in the album folder

@@ -38,7 +38,15 @@ library = 'D:\Music'             # finished albums land here: <library>/<artist>
 # genres = 3                       # how many MusicBrainz genres to write (0 = none)
 # title_comment = true             # add the release's disambiguation comment to the album title, title-cased:
 #                                  # "Days of the New (Red Album)" (tags, file names, store lookups)
-# title_comment_skip = ["explicit", "clean"]   # comment parts left out of the title
+# title_comment_skip = ["explicit", "explicit lyrics", "explicit version", "explicit edition",
+#     "explicit content", "explicit album", "explicit audio", "explicit release", "e",
+#     "parental advisory", "clean", "clean lyrics", "clean version", "clean edition",
+#     "clean content", "clean album", "clean audio", "clean release", "c", "edited",
+#     "edited version", "edited lyrics", "censored", "censored version", "uncensored",
+#     "uncensored version"]           # comment parts that are one of these (any case, brackets
+#                                  # ignored: "[E]" = "e") are left out of the title
+# title_comment_skip_formats = true   # also leave out parts that only state the audio format
+#                                  # ("24-bit 48kHz", "24bit/96kHz", "16-Bit, 44.1 kHz", "Hi-Res")
 
 [cover]
 # enabled = true
