@@ -499,14 +499,17 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
             anim_plan = "keep the existing cover.webp"
 
         def make_animated():
+            def tell(line: str, warn: bool = False) -> None:   # report and console
+                say(f"  {line}")
+                (log.warning if warn else log.info)("%s", line)
             if not wants_anim:
                 return None
             if keep_anim and not too_big:
-                say("  animated cover: keeping the existing cover.webp")
+                tell("animated cover: keeping the existing cover.webp")
                 return None
             if too_big:
-                say(f"  animated cover: the existing cover.webp is {too_big:.1f} MB, over the "
-                    f"{cfg['cover']['animated_max_mb']:g} MB limit - making it again")
+                tell(f"animated cover: the existing cover.webp is {too_big:.1f} MB, over the "
+                     f"{cfg['cover']['animated_max_mb']:g} MB limit - making it again")
             storefront = cfg["cover"]["itunes_country"].lower()
             stored = memory.get("apple") or {}
             known = stored.get("album_id") if stored.get("storefront") == storefront and not ignore_local_art else None
@@ -515,16 +518,18 @@ def _process_album(cfg, mb, files, infos, *, move, dry_run, forced_release, rip,
             made, result = None, None
             if not apple_id:
                 result = "album not found on Apple Music"
-                say(f"  animated cover: {result}")
+                tell(f"animated cover: {result}")
             else:
                 learned["apple"] = {"album_id": apple_id, "storefront": storefront}
                 try:
                     made = animated_cover(cfg, apple_id)
                     result = "created" if made else "no animated cover on Apple Music"
-                    say(f"  {made.note}" if made else f"  animated cover: {result}"
-                        + (" (keeping the existing cover.webp)" if too_big else ""))
+                    if made:
+                        say(f"  {made.note}")        # animated_cover() logged it already
+                    else:
+                        tell(f"animated cover: {result}" + (" (keeping the existing cover.webp)" if too_big else ""))
                 except (AnimatedUnavailable, NetworkError, NotFound, OSError, subprocess.SubprocessError) as e:
-                    say(f"  animated cover: not available ({e})")
+                    tell(f"animated cover: could not check Apple Music ({e}) - will try again next time", warn=True)
             if result:
                 learned["animated_cover"] = {"result": result, "checked": albumstate.today()}
             return made
